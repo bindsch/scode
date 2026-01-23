@@ -1,0 +1,46 @@
+# scode sandbox configuration
+# Copy to ~/.config/scode/sandbox.yaml
+#
+# Entries here are merged with built-in defaults:
+#   - "blocked" adds to the default blocked list
+#   - "allowed" overrides blocks recursively (path + descendants),
+#     including defaults and your additions
+#   - scalar options (net, fs_mode, strict, scrub_env) set defaults
+#
+# Priority: CLI flags > user config > project config > environment variables > built-in defaults
+#
+# Built-in defaults already block:
+#   ~/Documents, ~/Desktop, ~/Pictures, ~/Downloads
+#   ~/.aws, ~/.azure, ~/.config/gcloud, ~/.kube, ~/.docker
+#   ~/.gnupg, ~/.1password, ~/.op, ~/.password-store
+#   ~/.npmrc, ~/.netrc, ~/.git-credentials, ~/.pypirc
+#   ~/.gem/credentials, ~/.cargo/credentials.toml
+#   ~/.config/gh, ~/.config/hub
+#   ~/Library (macOS, with browser/keychain carve-outs)
+#   + additional Linux-specific blocks (browser profiles, keyrings, etc.)
+#
+# See also:
+#   sandbox-strict.yaml - for use with --strict flag
+#   sandbox-paranoid.yaml - maximum lockdown for untrusted code
+#   sandbox-permissive.yaml - opens up dirs for trusted projects
+#   sandbox-cloud-eng.yaml - for cloud/infra engineers
+
+# Sandbox flags (uncomment to enable)
+# These act as defaults; CLI flags always win.
+# net: off             # disable network (same as --no-net)
+# fs_mode: ro          # read-only project dir (same as --ro)
+# strict: true         # deny-default sandbox (same as --strict)
+# scrub_env: true      # strip API keys from env (same as --scrub-env)
+
+# Block additional directories beyond defaults
+# Note: inline comments (space + #) are stripped from unquoted values.
+# Paths containing literal " #" should be quoted: - "~/path with # in name"
+blocked:
+  # - ~/Dropbox
+  # - ~/OneDrive
+  # - ~/.ssh
+
+# Allow specific directories, overriding defaults
+allowed:
+  # - ~/Documents/projects
+  # - ~/Downloads/datasets

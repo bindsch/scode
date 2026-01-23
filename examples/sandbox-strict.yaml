@@ -1,0 +1,19 @@
+# scode strict sandbox configuration
+# Copy to ~/.config/scode/sandbox.yaml
+#
+# Enables strict mode by default. No need to pass --strict on the command line.
+# Note: strict mode already denies everything except project/system/explicit allows.
+# "blocked" entries here mainly matter when you also allow a parent path.
+
+strict: true
+
+# Additional directories to explicitly block
+blocked:
+  - ~/.ssh
+  - ~/Dropbox
+  - ~/OneDrive
+
+# In strict mode, only the project dir and system paths are allowed.
+# Use "allowed" to grant access to specific extra directories.
+allowed:
+  # - ~/shared-libs

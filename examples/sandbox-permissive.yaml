@@ -1,0 +1,23 @@
+# scode permissive sandbox configuration
+# Copy to ~/.config/scode/sandbox.yaml
+#
+# For trusted projects where the AI harness needs access to reference files,
+# datasets, or shared libraries that are blocked by default.
+
+scrub_env: true
+
+blocked:
+  # Uncomment to block cloud sync dirs
+  # - ~/Dropbox
+  # - ~/OneDrive
+
+allowed:
+  # Project reference materials
+  - ~/Documents/projects
+  - ~/Documents/specs
+
+  # Datasets and test fixtures
+  - ~/Downloads/datasets
+
+  # Shared libraries across projects
+  - ~/shared-libs

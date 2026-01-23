@@ -1,0 +1,29 @@
+# scode paranoid sandbox configuration
+# Copy to ~/.config/scode/sandbox.yaml
+#
+# Maximum lockdown for reviewing untrusted code or running untrusted tools.
+# Blocks SSH keys, GitHub CLI tokens, and cloud sync directories.
+# Network disabled, env scrubbed, strict mode, read-only project.
+
+strict: true
+net: off
+fs_mode: ro
+scrub_env: true
+
+blocked:
+  # SSH keys — not needed for code review
+  - ~/.ssh
+
+  # Cloud sync
+  - ~/Dropbox
+  - ~/OneDrive
+  - ~/Google Drive
+  - ~/iCloud Drive
+
+  # Additional personal dirs (~/Videos is a Linux default; listed here for macOS)
+  - ~/Music
+  - ~/Movies
+  - ~/Videos
+
+allowed:
+  # Nothing extra — this is paranoid mode
