@@ -127,6 +127,27 @@ YAML
   done
 }
 
+@test "CLI --block parent overrides config allowed child path" {
+  local policy_dir="$TEST_PROJECT/policy"
+  local blocked_parent="$policy_dir/parent"
+  local allowed_child="$blocked_parent/child"
+  mkdir -p "$allowed_child"
+
+  local config_file="$TEST_PROJECT/allow-child.yaml"
+  cat > "$config_file" <<YAML
+allowed:
+  - $allowed_child
+YAML
+
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" --block "$blocked_parent" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$blocked_parent"* ]]
+    [[ "$output" != *"$allowed_child"* ]]
+  done
+}
+
 # ---------- Config scalar flags ----------
 
 @test "config net: off disables network" {
@@ -532,6 +553,28 @@ YAML
   [[ "$output" == *"/tmp/path with # hash"* ]]
 }
 
+@test "config accepts YAML escaped single quotes ('it''s-data')" {
+  local config_file="$TEST_PROJECT/yaml-sq-escape.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - '/tmp/it''s-data'
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/tmp/it's-data"* ]]
+}
+
+@test "config plain single-quoted value still works" {
+  local config_file="$TEST_PROJECT/yaml-sq-plain.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - '/tmp/plain-single-quoted'
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/tmp/plain-single-quoted"* ]]
+}
+
 # ---------- Per-project .scode.yaml ----------
 
 @test "project .scode.yaml blocked paths are applied" {
@@ -558,6 +601,26 @@ YAML
   # should NOT appear in any deny rule.
   local docs_expanded="$HOME/Documents"
   [[ "$output" != *"(deny"*"$docs_expanded"* ]]
+}
+
+@test "CLI --block parent overrides project allowed child path" {
+  local policy_dir="$TEST_PROJECT/policy-project"
+  local blocked_parent="$policy_dir/parent"
+  local allowed_child="$blocked_parent/child"
+  mkdir -p "$allowed_child"
+
+  cat > "$TEST_PROJECT/.scode.yaml" <<YAML
+allowed:
+  - $allowed_child
+YAML
+
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --block "$blocked_parent" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$blocked_parent"* ]]
+    [[ "$output" != *"$allowed_child"* ]]
+  done
 }
 
 @test "user config overrides project config" {
@@ -701,4 +764,64 @@ YAML
   SCODE_CONFIG="/nonexistent/config-$$.yaml" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
   [ "$status" -eq 1 ]
   [[ "$output" == *"config file not found"* ]]
+}
+
+# ---------- Project config security warning regression ----------
+
+@test "project config warns when enabling network" {
+  mkdir -p "$TEST_PROJECT"
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+net: on
+YAML
+  run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enables network access"* ]]
+}
+
+@test "project config warns when disabling strict (if user config enables it)" {
+  mkdir -p "$TEST_PROJECT"
+  local user_config
+  user_config="$(mktemp)"
+  cat > "$user_config" <<'YAML'
+strict: true
+YAML
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+strict: false
+YAML
+  run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"disables strict mode"* ]]
+  rm -f "$user_config"
+}
+
+@test "project config warns when disabling scrub_env (if user config enables it)" {
+  mkdir -p "$TEST_PROJECT"
+  local user_config
+  user_config="$(mktemp)"
+  cat > "$user_config" <<'YAML'
+scrub_env: true
+YAML
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+scrub_env: false
+YAML
+  run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"disables env scrubbing"* ]]
+  rm -f "$user_config"
+}
+
+@test "project config no warning when net: on matches user config" {
+  mkdir -p "$TEST_PROJECT"
+  local user_config
+  user_config="$(mktemp)"
+  cat > "$user_config" <<'YAML'
+net: on
+YAML
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+net: on
+YAML
+  run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"enables network access"* ]]
+  rm -f "$user_config"
 }

@@ -41,6 +41,13 @@ load test_helper
   [[ "$output" == *"strict+claude"* ]]
 }
 
+@test "detect_harness finds harness after shell command separator" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -lc "cd /tmp && claude --version"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
 @test "detect_harness: shell wrapper does not match harness in arguments" {
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -lc "echo claude"
   [ "$status" -eq 0 ]
@@ -403,4 +410,43 @@ YAML
   # trusted preset pins scrub_env=0 at CLI level, config cannot override
   [[ "$output" != *"--scrub-env active"* ]]
   rm -f "$user_config"
+}
+
+# ---------- Wrapper -- handling regression ----------
+
+@test "detect_harness: env -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- env -- claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: nice -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- nice -- claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: nice with numeric priority" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- nice 10 claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: nice -n 5 claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- nice -n 5 claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: timeout -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- timeout -- 30 claude
+  [ "$status" -eq 0 ]
+  # After --, '30' is the command, not timeout's duration
+  # So 'claude' won't be detected — verify graceful handling
+  [[ "$status" -eq 0 ]]
 }

@@ -135,8 +135,8 @@ load test_helper
 @test "default command is opencode" {
   # dry-run with no command should show opencode as default
   run "$SCODE" --dry-run -C "$TEST_PROJECT"
-  # opencode might or might not be installed; either way the output should reference it
-  [[ "$output" == *"opencode"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# Command: opencode"* ]]
 }
 
 # ---------- -- separator ----------
@@ -189,8 +189,13 @@ load test_helper
   # This just verifies it does not crash; the actual path will
   # fail directory validation, which is fine
   run "$SCODE" --dry-run --block "~root" -C "$TEST_PROJECT" -- true
-  # Should either succeed (treating ~root literally) or fail gracefully
+  # Should succeed (treating ~root as literal path) or fail with validation error
   [[ "$status" -eq 0 || "$status" -eq 1 ]]
+  # Either way, ~root must NOT have been expanded to the root user's home
+  if [[ "$status" -eq 0 ]]; then
+    [[ "$output" != *"/var/root"* ]]
+    [[ "$output" != *"/root"* ]]
+  fi
 }
 
 # ---------- --ro --rw ordering ----------
@@ -248,5 +253,30 @@ load test_helper
 @test "help documents -w alias for audit --watch" {
   run "$SCODE" --help
   [ "$status" -eq 0 ]
-  [[ "$output" == *"-w"* ]]
+  [[ "$output" == *"--watch|-w"* ]]
+}
+
+# ---------- Bash 3.2 empty array compat regression ----------
+
+@test "dry-run succeeds with no --block and no --allow (empty arrays)" {
+  # Regression: bash 3.2 crashes on "${empty[@]}" with set -u
+  run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+}
+
+@test "dry-run succeeds with --block but no --allow" {
+  run "$SCODE" --dry-run --block "$HOME/.test-block-$$" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+}
+
+@test "dry-run succeeds with --allow but no --block" {
+  run "$SCODE" --dry-run --allow "$HOME/.aws" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+}
+
+@test "dry-run succeeds with no config file and no project config" {
+  # Ensures empty CONFIG_BLOCKED/CONFIG_ALLOWED/PROJECT_BLOCKED/PROJECT_ALLOWED don't crash
+  SCODE_CONFIG=/nonexistent/config run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]  # fails because explicit config not found, but should not crash
+  [[ "$output" == *"config file not found"* ]]
 }

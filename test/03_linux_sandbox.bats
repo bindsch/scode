@@ -496,6 +496,20 @@ YAML
 
 # ---------- Linux strict: allow overrides block ----------
 
+@test "linux dry-run: --block on project subdir re-blocks after project bind" {
+  local blocked_parent="/tmp/scode-fix10-linux-$$"
+  local project_dir="$blocked_parent/myproject"
+  local secret_dir="$project_dir/secrets"
+  mkdir -p "$secret_dir"
+  local real_secret_dir
+  real_secret_dir="$(realpath "$secret_dir")"
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- true
+  [ "$status" -eq 0 ]
+  # The bwrap args should contain --tmpfs for the secrets subdir after the project bind
+  [[ "$output" == *"--tmpfs ${real_secret_dir}"* ]]
+  rm -rf "$blocked_parent"
+}
+
 @test "linux dry-run: --strict allow overrides --block under allowed parent" {
   mkdir -p "$TEST_PROJECT/secrets/tokens"
   local real_project

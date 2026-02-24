@@ -67,12 +67,10 @@ load test_helper
 # ---------- Environment scrubbing ----------
 
 @test "--scrub-env removes sensitive vars" {
-  export OPENAI_API_KEY="test-key-12345"
-  run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  OPENAI_API_KEY="test-key-12345" run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [[ "$output" == *"scrubbed env vars"* ]]
   [[ "$output" == *"OPENAI_API_KEY"* ]]
-  unset OPENAI_API_KEY
 }
 
 @test "--scrub-env covers all documented token patterns" {

@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.1.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
+> **Beta software (v0.1.1).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
 scode wraps AI coding tools (Claude, Codex, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
@@ -28,7 +28,7 @@ AI coding CLIs are starting to ship built-in sandboxes. A few third-party wrappe
 
 **Zero infrastructure.** Single bash script. No daemon, no proxy, no container, no language runtime. Works on a fresh macOS machine with nothing installed, or any Linux box with bubblewrap.
 
-**Batteries included.** Blocks credentials, cloud tokens, password managers, and personal files across 35+ paths out of the box. Chromium double-sandbox issues handled automatically. Environment scrubbing strips 30 token patterns (including wildcards like `AWS_*`).
+**Batteries included.** Blocks credentials, cloud tokens, password managers, and personal files across 20+ paths out of the box (35+ on Linux with platform-specific extras). Chromium double-sandbox issues handled automatically. Environment scrubbing strips 30 token patterns (including wildcards like `AWS_*`).
 
 **YOLO mode safety net.** Running with `--dangerously-skip-permissions` or auto-accepting tool calls? scode lets you do that without less worry. The harness can write code and run commands freely inside your project, but it still cannot touch your cloud credentials, password managers, or personal documents. Accept permissions more liberally knowing the blast radius is capped.
 
@@ -80,7 +80,7 @@ make uninstall PREFIX=~/.local
 ### Manual
 
 ```bash
-VERSION="vX.Y.Z"  # set to the release tag you want, e.g. v0.1.0
+VERSION="vX.Y.Z"  # set to the release tag you want, e.g. v0.1.1
 curl -fsSL "https://raw.githubusercontent.com/bindsch/scode/${VERSION}/scode" -o /usr/local/bin/scode
 chmod +x /usr/local/bin/scode
 mkdir -p /usr/local/lib/scode
@@ -450,7 +450,7 @@ Since scode is itself a sandbox, inner browser sandboxes fail (double-sandboxing
 | `PLAYWRIGHT_MCP_NO_SANDBOX=1` | Playwright MCP server |
 | `CHROMIUM_FLAGS="--no-sandbox"` | Chrome/Chromium (Linux distro wrappers) |
 
-For Puppeteer and Playwright library usage, scode injects a Node.js preload module (via `NODE_OPTIONS`) that patches `child_process.spawn` to add `--no-sandbox` when launching Chromium binaries. No code changes needed.
+For Puppeteer and Playwright library usage, scode injects a Node.js preload module (via `NODE_OPTIONS`) that patches `child_process.spawn`, `spawnSync`, `exec`, `execSync`, `execFile`, and `execFileSync` to add `--no-sandbox` when launching Chromium binaries. No code changes needed.
 
 For Claude Code with Playwright, create `.mcp.json` in your project root:
 

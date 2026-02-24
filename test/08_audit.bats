@@ -227,6 +227,46 @@ EOF
   [[ "$output" == *"$TEST_PROJECT/relative-secret.txt"* ]]
 }
 
+@test "audit parses Permission denied path containing colon" {
+  local log_file="$TEST_PROJECT/audit-colon-perm.log"
+  cat > "$log_file" <<'EOF'
+cat: /tmp/my:file.txt: Permission denied
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/tmp/my:file.txt"* ]]
+}
+
+@test "audit parses Operation not permitted path containing colon" {
+  local log_file="$TEST_PROJECT/audit-colon-op.log"
+  cat > "$log_file" <<'EOF'
+tool: /opt/data:cache/db.sqlite: Operation not permitted
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/opt/data:cache/db.sqlite"* ]]
+}
+
+@test "audit strips trailing slash from allowed metadata" {
+  local log_file="$TEST_PROJECT/audit-trailing-slash.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-02-15T10:00:00-0800
+# blocked: platform /tmp/scode-slash-parent
+# allowed: /tmp/scode-slash-parent/child/
+#---
+deny(file-read-data) /tmp/scode-slash-parent/child/denied.txt
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  # The denied path is under the allowed subtree (after trailing-slash strip),
+  # so it should NOT suggest the blocked parent as --allow.
+  local parent_suggestion_count
+  parent_suggestion_count="$(echo "$output" | grep -c '^  --allow /tmp/scode-slash-parent$' || true)"
+  [ "$parent_suggestion_count" -eq 0 ]
+}
+
 @test "audit parses Node.js EACCES patterns" {
   local log_file="$TEST_PROJECT/audit-node.log"
   cat > "$log_file" <<EOF
@@ -715,6 +755,60 @@ EOF
   local final_count
   final_count=$(grep -cE '^\[.*\] DENIED:' "$out_file" || true)
   [ "$final_count" -eq 1 ]
+}
+
+# ---------- audit_watch log_cwd regression ----------
+
+@test "audit --watch resolves relative paths via log cwd" {
+  local log_file="$TEST_PROJECT/watch-cwd.log"
+  local out_file="$TEST_PROJECT/watch-cwd-out.txt"
+  local watch_pid=""
+  # Create a log with cwd metadata
+  cat > "$log_file" <<'EOF'
+# scode session: test
+# cwd: /home/testuser/project
+#---
+EOF
+
+  # Start audit --watch in background
+  "$SCODE" audit --watch "$log_file" > "$out_file" 2>&1 &
+  watch_pid=$!
+
+  # Poll until watch is running
+  local attempts=0
+  while ! grep -q "watching" "$out_file" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 20 ]]; then
+      stop_watch_process "$watch_pid"
+      fail "timed out waiting for audit --watch to start"
+    fi
+    sleep 0.1
+  done
+
+  # Append a denial with a relative path
+  echo "deny(file-read-data) ./src/secret.txt" >> "$log_file"
+
+  # Poll until the denial appears
+  attempts=0
+  while true; do
+    local count
+    count=$(grep -cE '^\[.*\] DENIED:' "$out_file" 2>/dev/null || true)
+    [[ "$count" -ge 1 ]] && break
+    attempts=$((attempts + 1))
+    if [[ $attempts -ge 40 ]]; then
+      stop_watch_process "$watch_pid"
+      fail "timed out waiting for denial output"
+    fi
+    sleep 0.1
+  done
+
+  stop_watch_process "$watch_pid"
+  watch_pid=""
+
+  local watch_output
+  watch_output="$(cat "$out_file")"
+  # Relative path should be resolved using the logged cwd
+  [[ "$watch_output" == *"/home/testuser/project/src/secret.txt"* ]]
 }
 
 # ---------- Packaging: make install/uninstall dry-run ----------

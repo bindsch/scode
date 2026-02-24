@@ -134,8 +134,8 @@ wait_for_file() {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/usr/bin/sudo"* ]]
-  [[ "$output" == *"/usr/bin/su"* ]]
+  [[ "$output" == *"(deny process-exec (regex #"* ]]
+  [[ "$output" == *"(sudo|su|login|doas|pkexec)"* ]]
 }
 
 @test "dry-run: --no-net denies network" {
@@ -510,8 +510,8 @@ YAML
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/usr/bin/doas"* ]]
-  [[ "$output" == *"/usr/bin/pkexec"* ]]
+  [[ "$output" == *"doas"* ]]
+  [[ "$output" == *"pkexec"* ]]
 }
 
 # ---------- macOS runtime: --cwd ----------
@@ -558,4 +558,93 @@ YAML
     harness_pos=$(echo "$output" | grep -n "Harness auto-allowed" | head -1 | cut -d: -f1)
     [ "$deny_pos" -lt "$harness_pos" ]
   fi
+}
+
+# ---------- Privilege escalation prevention regression ----------
+
+@test "dry-run: privilege escalation uses regex not literal" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  # Should use regex pattern instead of literal paths
+  [[ "$output" == *'(deny process-exec (regex'* ]]
+  [[ "$output" == *"sudo"* ]]
+  [[ "$output" == *"pkexec"* ]]
+  # Should NOT have the old literal form
+  [[ "$output" != *'(deny process-exec (literal "/usr/bin/sudo"))'* ]]
+}
+
+@test "dry-run strict: privilege escalation uses regex" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'(deny process-exec (regex'* ]]
+  [[ "$output" != *'(deny process-exec (literal "/usr/bin/sudo"))'* ]]
+}
+
+@test "dry-run: sandbox-exec uses -- separator before command" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# Command: true"* ]]
+}
+
+# ---------- Fix 3: CLI --block skips command-binary auto-allow ----------
+
+@test "dry-run: CLI --block prevents command-binary auto-allow" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local blocked_dir="$TEST_PROJECT/blocked-bin"
+  mkdir -p "$blocked_dir"
+  local fake_tool="$blocked_dir/mytool"
+  printf '#!/bin/bash\ntrue\n' > "$fake_tool"
+  chmod +x "$fake_tool"
+  run "$SCODE" --dry-run --block "$blocked_dir" -C "$TEST_PROJECT" -- "$fake_tool"
+  [ "$status" -eq 0 ]
+  # Should NOT contain auto-allow for the binary
+  [[ "$output" != *"Command binary (auto-allow"* ]]
+}
+
+@test "dry-run: config --block still allows command-binary auto-allow" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local blocked_dir="$TEST_PROJECT/config-blocked-bin"
+  mkdir -p "$blocked_dir"
+  local fake_tool="$blocked_dir/mytool"
+  printf '#!/bin/bash\ntrue\n' > "$fake_tool"
+  chmod +x "$fake_tool"
+  local config_file="$TEST_PROJECT/block-config-autoallow.yaml"
+  printf 'blocked:\n  - %s\n' "$blocked_dir" > "$config_file"
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- "$fake_tool"
+  [ "$status" -eq 0 ]
+  # Config block (not CLI block) should still get auto-allow
+  [[ "$output" == *"Command binary (auto-allow"* ]]
+}
+
+# ---------- Fix 10: --block subdir inside project under blocked parent ----------
+
+@test "dry-run: --block on project subdir re-denies after project override" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local blocked_parent="/tmp/scode-fix10-parent-$$"
+  local project_dir="$blocked_parent/myproject"
+  local secret_dir="$project_dir/secrets"
+  mkdir -p "$secret_dir"
+  run "$SCODE" --dry-run --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- true
+  [ "$status" -eq 0 ]
+  # The profile should re-deny the secrets subdir after the project allow
+  [[ "$output" == *"(deny file-read* file-write*"* ]]
+  [[ "$output" == *"secrets"* ]]
+  rm -rf "$blocked_parent"
+}
+
+@test "runtime: --block on project subdir blocks access under blocked parent" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  require_runtime_sandbox
+  local blocked_parent="/tmp/scode-fix10-rt-$$"
+  local project_dir="$blocked_parent/myproject"
+  local secret_dir="$project_dir/secrets"
+  mkdir -p "$secret_dir"
+  echo "topsecret" > "$secret_dir/key.txt"
+  # The command should fail to read the secret file
+  run "$SCODE" --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- cat secrets/key.txt
+  [[ "$output" != *"topsecret"* ]]
+  rm -rf "$blocked_parent"
 }

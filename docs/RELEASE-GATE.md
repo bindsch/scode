@@ -11,7 +11,7 @@ Use this checklist before tagging a new `scode` release.
 - [ ] README beta/version banner matches:
   - `README.md`
 - [ ] Manual install section uses parameterized `VERSION` variable:
-  - `README.md` — verify the example comment (`e.g. v0.1.0`) matches the release target
+  - `README.md` — verify the example comment (`e.g. v0.1.1`) matches the release target
 
 ## 2) Automated checks
 
