@@ -518,17 +518,15 @@ YAML
 
 # ---------- Config: inline comments on list items ----------
 
-@test "config strips inline comments from list items" {
+@test "config rejects inline comments on unquoted list items" {
   local config_file="$TEST_PROJECT/list-comment.yaml"
   cat > "$config_file" <<'YAML'
 blocked:
   - /tmp/list-item-test # this is a comment
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/list-item-test"* ]]
-  # The comment text should NOT appear in the profile
-  [[ "$output" != *"this is a comment"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unquoted list item contains ' #'"* ]]
 }
 
 @test "config preserves hash in quoted list paths" {
@@ -725,6 +723,24 @@ YAML
   [[ "$output" == *"Documents/projects"* ]]
 }
 
+@test "project config warns when allowing HOME parent of default-protected paths" {
+  mkdir -p "$TEST_PROJECT"
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+allowed:
+  - ~
+YAML
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"project config (.scode.yaml) unblocks default-protected path"* ]]
+    local blocked_section
+    blocked_section="$(echo "$output" | sed -n '/Blocked directories/,/^$/p')"
+    [[ "$blocked_section" != *"$HOME/.aws"* ]]
+    [[ "$blocked_section" != *"$HOME/.gnupg"* ]]
+  done
+}
+
 @test "project config does not warn for non-default allowed path" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
@@ -824,4 +840,180 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"enables network access"* ]]
   rm -f "$user_config"
+}
+
+# ---------- YAML parser edge cases ----------
+
+@test "config: double-quoted value with backslash" {
+  local config_file="$TEST_PROJECT/dq-backslash.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - "/path/with backslash \\ here"
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  # parse_yaml_value preserves raw \\ from double-quoted string;
+  # sandbox profile then escapes each \ as \\, yielding 4 backslashes in output
+  [[ "$output" == *'backslash \\\\ here'* ]]
+}
+
+@test "config: empty double-quoted value" {
+  local config_file="$TEST_PROJECT/empty-dq.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - ""
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"empty list item"* ]]
+}
+
+@test "config: empty single-quoted value" {
+  local config_file="$TEST_PROJECT/empty-sq.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - ''
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"empty list item"* ]]
+}
+
+@test "config: bare key with no value (empty)" {
+  local config_file="$TEST_PROJECT/bare-key.yaml"
+  printf 'net:\n' > "$config_file"
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  # bare "net:" without value is parsed as a section header;
+  # net is not a valid section (only blocked/allowed), so it errors
+  [[ "$output" == *"unknown section"* ]]
+  [[ "$output" == *"net"* ]]
+}
+
+@test "config: unquoted path with spaces" {
+  local config_file="$TEST_PROJECT/unquoted-spaces.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - /path/with spaces/dir
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/path/with spaces/dir"* ]]
+}
+
+@test "config rejects unquoted list item containing literal space-hash fragment" {
+  local config_file="$TEST_PROJECT/unquoted-hash-fragment.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - /tmp/project #3
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unquoted list item contains ' #'"* ]]
+}
+
+@test "config: unquoted tilde path" {
+  local config_file="$TEST_PROJECT/tilde-path.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - ~/custom-dir
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$HOME/custom-dir"* ]]
+}
+
+@test "config: double-quoted value with colon" {
+  local config_file="$TEST_PROJECT/dq-colon.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - "colon:value"
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"colon:value"* ]]
+}
+
+@test "config: single-quoted value with colon" {
+  local config_file="$TEST_PROJECT/sq-colon.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - 'colon:value'
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"colon:value"* ]]
+}
+
+@test "config: boolean true/on/yes — only true accepted for strict" {
+  # strict only accepts true/false; on/yes are rejected
+  local config_file="$TEST_PROJECT/strict-true-ok.yaml"
+  printf 'strict: true\n' > "$config_file"
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    assert_strict_mode_output "$output"
+  done
+  # on / yes should be rejected
+  for v in on yes; do
+    local bad_file="$TEST_PROJECT/strict-${v}.yaml"
+    printf 'strict: %s\n' "$v" > "$bad_file"
+    run "$SCODE" --dry-run --config "$bad_file" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid config"* ]]
+    [[ "$output" == *"strict"* ]]
+  done
+}
+
+@test "config: boolean false/off/no — only false accepted for strict" {
+  # strict only accepts true/false; off/no are rejected
+  local config_file="$TEST_PROJECT/strict-false-ok.yaml"
+  printf 'strict: false\n' > "$config_file"
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    assert_non_strict_mode_output "$output"
+  done
+  # off / no should be rejected
+  for v in off no; do
+    local bad_file="$TEST_PROJECT/strict-${v}.yaml"
+    printf 'strict: %s\n' "$v" > "$bad_file"
+    run "$SCODE" --dry-run --config "$bad_file" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid config"* ]]
+    [[ "$output" == *"strict"* ]]
+  done
+}
+
+@test "config: blocked and allowed lists with mixed quoting styles" {
+  local config_file="$TEST_PROJECT/mixed-quoting.yaml"
+  cat > "$config_file" <<'YAML'
+blocked:
+  - /tmp/unquoted-block
+  - "/tmp/double-quoted-block"
+  - '/tmp/single-quoted-block'
+allowed:
+  - /tmp/unquoted-allow
+  - "/tmp/double-quoted-allow"
+  - '/tmp/single-quoted-allow'
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/tmp/unquoted-block"* ]]
+  [[ "$output" == *"/tmp/double-quoted-block"* ]]
+  [[ "$output" == *"/tmp/single-quoted-block"* ]]
+}
+
+@test "config: CRLF line endings with lists" {
+  local config_file="$TEST_PROJECT/crlf-list.yaml"
+  printf 'blocked:\r\n  - /tmp/crlf-item\r\nnet: off\r\n' > "$config_file"
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/tmp/crlf-item"* ]]
+    assert_network_disabled_output "$output"
+  done
 }

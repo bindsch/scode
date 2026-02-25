@@ -453,6 +453,29 @@ EOF
   [[ "$val" == *"--no-sandbox"* ]]
 }
 
+@test "preload injects --no-sandbox for spawn shell:true bash -lc wrapper args" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const path = require('path');
+    const binDir = '$TEST_PROJECT';
+    const bin = path.join(binDir, 'chromium');
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const env = { ...process.env, PATH: binDir + ':' + process.env.PATH };
+    const r = cp.spawnSync('bash', ['-lc', 'chromium --headless'], {
+      shell: true,
+      encoding: 'utf8',
+      env
+    });
+    console.log(r.stdout.trim());
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+  [[ "$val" == *"--headless"* ]]
+}
+
 @test "preload injects --no-sandbox for sh -c chromium wrapper" {
   require_node
   local val
@@ -782,6 +805,52 @@ YAML
   [[ "$val" == *"--no-sandbox"* ]]
 }
 
+@test "preload injects --no-sandbox for timeout --foreground wrapper" {
+  require_node
+  local tool_dir="$TEST_PROJECT/tools-timeout"
+  mkdir -p "$tool_dir"
+  cat > "$tool_dir/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --foreground|-v|--verbose)
+      shift
+      ;;
+    -k|--kill-after|-s|--signal)
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+if [[ $# -gt 0 && "$1" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)[sSmMhHdD]?$ ]]; then
+  shift
+fi
+exec "$@"
+EOF
+  chmod +x "$tool_dir/timeout"
+  local val
+  val=$(PATH="$tool_dir:$PATH" SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = cp.spawnSync('timeout', ['--foreground', bin, '--headless'], { encoding: 'utf8' });
+    console.log(r.stdout.trim());
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+}
+
 @test "preload injects --no-sandbox for stdbuf wrapper" {
   require_node
   local val
@@ -806,6 +875,36 @@ YAML
     const bin = '$TEST_PROJECT/chromium';
     fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
     const r = String(cp.execSync('command \"' + bin + '\" --headless', { encoding: 'utf8' })).trim();
+    console.log(r);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+}
+
+@test "preload injects --no-sandbox for command -p wrapper" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = String(cp.execSync('command -p \"' + bin + '\" --headless', { encoding: 'utf8' })).trim();
+    console.log(r);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+}
+
+@test "preload injects --no-sandbox for time -p wrapper" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = String(cp.execSync('time -p \"' + bin + '\" --headless', { encoding: 'utf8' })).trim();
     console.log(r);
     fs.unlinkSync(bin);
   " 2>/dev/null)
@@ -1217,6 +1316,65 @@ EOF
   [[ "$val" == *"--no-sandbox"* ]]
 }
 
+@test "preload patches shell-wrapped and bare chromium in same command string" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const path = require('path');
+    const toolDir = '$TEST_PROJECT/tools-mixed-shell';
+    fs.mkdirSync(toolDir, { recursive: true });
+    const chromiumBin = path.join(toolDir, 'chromium');
+    const braveBin = path.join(toolDir, 'brave');
+    fs.writeFileSync(chromiumBin, '#!/bin/bash\necho \"chromium:\\\$@\"', { mode: 0o755 });
+    fs.writeFileSync(braveBin, '#!/bin/bash\necho \"brave:\\\$@\"', { mode: 0o755 });
+    const out = String(cp.execSync('bash -c \"chromium --first\" && brave --second', {
+      encoding: 'utf8',
+      env: { ...process.env, PATH: toolDir + ':' + process.env.PATH },
+    })).trim();
+    const count = (out.match(/--no-sandbox/g) || []).length;
+    console.log(count + '|' + out.replace(/\\n/g, ';'));
+    fs.rmSync(toolDir, { recursive: true, force: true });
+  " 2>/dev/null)
+  [[ "$val" == 2\|* ]]
+}
+
+@test "preload injects through then/do/done/fi/else/esac flow-control keywords" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const chromiumBin = '$TEST_PROJECT/chromium';
+    const braveBin = '$TEST_PROJECT/brave';
+    fs.writeFileSync(chromiumBin, '#!/bin/bash\necho \"chromium:\\\$@\"', { mode: 0o755 });
+    fs.writeFileSync(braveBin, '#!/bin/bash\necho \"brave:\\\$@\"', { mode: 0o755 });
+    const cmd = 'if true; then \"' + chromiumBin + '\" --if; else \"' + braveBin + '\" --else; fi; for i in 1; do \"' + braveBin + '\" --loop; done; case x in x) \"' + chromiumBin + '\" --case ;; esac';
+    const out = String(cp.execSync(cmd, { encoding: 'utf8' })).trim();
+    const count = (out.match(/--no-sandbox/g) || []).length;
+    console.log(count + '|' + out.replace(/\\n/g, ';'));
+    fs.unlinkSync(chromiumBin);
+    fs.unlinkSync(braveBin);
+  " 2>/dev/null)
+  [[ "$val" == 3\|* ]]
+}
+
+@test "preload injects effective --no-sandbox for unquoted bash -c chromium" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const out = String(cp.execSync('bash -c ' + bin, { encoding: 'utf8' })).trim();
+    console.log(out);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+}
+
 @test "preload injects --no-sandbox for bash -ce shell flag" {
   require_node
   local val
@@ -1260,6 +1418,36 @@ EOF
     fs.unlinkSync(bin);
   " 2>/dev/null)
   [[ "$val" == *"--no-sandbox"* ]]
+}
+
+@test "preload does not inject --no-sandbox for bash -c -- shell form" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = cp.spawnSync('bash', ['-c', '--', '\"' + bin + '\" --headless'], { encoding: 'utf8' });
+    console.log(r.stdout.trim());
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" != *"--no-sandbox"* ]]
+}
+
+@test "preload does not inject for unquoted bash -c -- chromium" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const out = String(cp.execSync('bash -c -- ' + bin, { encoding: 'utf8' })).trim();
+    console.log(out);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" != *"--no-sandbox"* ]]
 }
 
 @test "preload tokenizer handles FOO=\"bar baz\" assignment" {
@@ -1307,6 +1495,38 @@ EOF
     fs.unlinkSync(bin);
   " 2>/dev/null)
   [[ "$val" == "1" ]]
+}
+
+@test "preload injects --no-sandbox for env -S split-string command" {
+  require_node
+  env -S "echo env-split-check" >/dev/null 2>&1 || skip "env -S not available"
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const out = String(cp.execSync('env -S \"\\\"' + bin + '\\\" --headless\"', { encoding: 'utf8' })).trim();
+    console.log(out);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+  [[ "$val" == *"--headless"* ]]
+}
+
+@test "preload does not inject --no-sandbox for electron-builder binary" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/electron-builder';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = cp.spawnSync(bin, ['--version'], { encoding: 'utf8' });
+    console.log(r.stdout.trim());
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" != *"--no-sandbox"* ]]
 }
 
 @test "preload nice wrapper does not double-inject --no-sandbox" {

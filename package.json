@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "engines": {
+    "node": ">=18.13.0"
+  },
+  "devDependencies": {
+    "fast-check": "^3"
+  }
+}

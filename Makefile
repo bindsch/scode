@@ -4,7 +4,7 @@ LIBDIR  = $(PREFIX)/lib/scode
 SHAREDIR = $(PREFIX)/share/scode
 EXAMPLESDIR = $(SHAREDIR)/examples
 
-.PHONY: install uninstall test lint
+.PHONY: install uninstall test test-js lint
 
 install:
 	install -d "$(BINDIR)"
@@ -25,5 +25,19 @@ uninstall:
 lint:
 	shellcheck scode
 
-test: lint
+test-js:
+	@if ! command -v node >/dev/null 2>&1; then \
+		echo "WARNING: test-js SKIPPED — node not found" >&2; \
+		[ -z "$(SCODE_REQUIRE_JS_TESTS)" ] || exit 1; \
+	elif ! node -e 'const v=process.versions.node.split(".").map(Number); if(v[0]<18||(v[0]===18&&v[1]<13))process.exit(1)' 2>/dev/null; then \
+		echo "WARNING: test-js SKIPPED — node >= 18.13 required for --test runner" >&2; \
+		[ -z "$(SCODE_REQUIRE_JS_TESTS)" ] || exit 1; \
+	elif ! [ -d node_modules ]; then \
+		echo "WARNING: test-js SKIPPED — node_modules missing (run npm install)" >&2; \
+		[ -z "$(SCODE_REQUIRE_JS_TESTS)" ] || exit 1; \
+	else \
+		SCODE_TEST=1 node --test test/no-sandbox.test.js; \
+	fi
+
+test: lint test-js
 	bats test/

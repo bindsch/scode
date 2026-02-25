@@ -198,6 +198,41 @@ load test_helper
   fi
 }
 
+# ---------- Block/allow hierarchy edge cases ----------
+
+@test "--block / suppresses descendant config allows" {
+  local config_file="$TEST_PROJECT/root-block-config.yaml"
+  cat > "$config_file" <<'YAML'
+allowed:
+  - /tmp/scode-root-allow
+YAML
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" --block / -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(subpath \"/\")"* || "$output" == *"--tmpfs /"* ]]
+    [[ "$output" != *"/tmp/scode-root-allow"* ]]
+  done
+}
+
+@test "trailing slash on --block still suppresses descendant config allows" {
+  local blocked_parent="${TEST_PROJECT}/slash-parent/"
+  local blocked_parent_norm="${blocked_parent%/}"
+  local allowed_child="${blocked_parent_norm}/child"
+  local config_file="$TEST_PROJECT/trailing-block-config.yaml"
+  cat > "$config_file" <<YAML
+allowed:
+  - ${allowed_child}
+YAML
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" --block "$blocked_parent" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"${blocked_parent_norm}"* ]]
+    [[ "$output" != *"${allowed_child}"* ]]
+  done
+}
+
 # ---------- --ro --rw ordering ----------
 
 @test "last fs mode flag wins (--ro --rw)" {

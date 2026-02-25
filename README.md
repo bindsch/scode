@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.1.1).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
+> **Beta software (v0.2.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
 scode wraps AI coding tools (Claude, Codex, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
@@ -80,7 +80,7 @@ make uninstall PREFIX=~/.local
 ### Manual
 
 ```bash
-VERSION="vX.Y.Z"  # set to the release tag you want, e.g. v0.1.1
+VERSION="vX.Y.Z"  # set to the release tag you want, e.g. v0.2.0
 curl -fsSL "https://raw.githubusercontent.com/bindsch/scode/${VERSION}/scode" -o /usr/local/bin/scode
 chmod +x /usr/local/bin/scode
 mkdir -p /usr/local/lib/scode
@@ -432,7 +432,7 @@ scode --log session.log --strict codex
 scode audit --watch session.log
 ```
 
-Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. Recognized denial formats:
+Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. New logs begin with a machine-readable `#json:` header line, followed by legacy `# ...` metadata lines for compatibility. Recognized denial formats:
 
 - macOS `sandbox-exec`: `deny(file-read-data) /path`
 - Generic Unix: `/path: Permission denied`, `/path: Operation not permitted`
@@ -473,7 +473,7 @@ For Claude Code with Playwright, create `.mcp.json` in your project root:
 
 **Both platforms:**
 - **Strict mode** — deny-default, allow essentials (`/usr`, `/opt`, system dirs). Auto-allows harness config dir when a known harness is detected. On macOS, strict mode also adds `~/Library` carve-outs for known harnesses.
-- **`--block` under project dir** — if the project dir sits under a blocked parent, the project-dir override re-allows the entire project subtree. `--block` on subdirectories within the project will not take effect in this case.
+- **`--block` under project dir** — if the project dir sits under a blocked parent, the project-dir override re-allows the project subtree so work can proceed. `--block` entries inside the project are then re-applied, so blocking project subdirectories still works.
 
 ## Tips
 
@@ -596,15 +596,17 @@ Open an issue or PR on [GitHub](https://github.com/bindsch/scode). This is beta 
 ## Running tests
 
 ```bash
-brew install bats-core shellcheck   # or: apt install bats shellcheck
-make test                           # runs shellcheck + bats
+brew install bats-core shellcheck node   # or: apt install bats shellcheck nodejs npm
+npm install
+make test                                 # runs shellcheck + JS tests + bats
 ```
 
-`make test` runs `shellcheck scode` followed by the full `bats` test suite. You can also run them separately:
+`make test` runs `shellcheck scode`, `make test-js`, then the full `bats` suite. You can also run them separately:
 
 ```bash
-make lint    # shellcheck only
-bats test/   # bats only
+make lint      # shellcheck only
+make test-js   # Node.js preload tests
+bats test/     # bats only
 ```
 
 ## Release checklist

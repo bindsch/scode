@@ -451,10 +451,10 @@ YAML
   run "$SCODE" --dry-run --block "$blocked_parent" -C "$project" -- true
   [ "$status" -eq 0 ]
   # Parent should be blocked
-  [[ "$output" == *"(deny file-read* file-write*"* ]]
+  [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
   # Project should have an explicit allow override
   [[ "$output" == *"override blocked parent"* ]]
-  [[ "$output" == *"(allow file-read* file-write*"* ]]
+  [[ "$output" == *"(allow file-read* file-write* process-exec"* ]]
   [[ "$output" == *"${real_project}"* ]]
 }
 
@@ -528,6 +528,21 @@ YAML
 }
 
 # ---------- P1 regression: strict mode allow/deny ordering ----------
+
+@test "dry-run: default mode --allow child of blocked parent emits allow AFTER deny" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local blocked_dir="$TEST_PROJECT/blocked-parent-default"
+  local allow_dir="$TEST_PROJECT/blocked-parent-default/child"
+  mkdir -p "$allow_dir"
+  run "$SCODE" --dry-run --block "$blocked_dir" --allow "$allow_dir" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local deny_pos allow_pos
+  deny_pos=$(echo "$output" | grep -n "Blocked directories" | head -1 | cut -d: -f1)
+  allow_pos=$(echo "$output" | grep -n "Explicitly allowed" | head -1 | cut -d: -f1)
+  [ -n "$deny_pos" ]
+  [ -n "$allow_pos" ]
+  [ "$deny_pos" -lt "$allow_pos" ]
+}
 
 @test "dry-run: --strict --allow child of blocked parent emits allow AFTER deny" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
@@ -624,21 +639,22 @@ YAML
 @test "dry-run: --block on project subdir re-denies after project override" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   local blocked_parent="/tmp/scode-fix10-parent-$$"
+  track_cleanup "$blocked_parent"
   local project_dir="$blocked_parent/myproject"
   local secret_dir="$project_dir/secrets"
   mkdir -p "$secret_dir"
   run "$SCODE" --dry-run --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- true
   [ "$status" -eq 0 ]
   # The profile should re-deny the secrets subdir after the project allow
-  [[ "$output" == *"(deny file-read* file-write*"* ]]
+  [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
   [[ "$output" == *"secrets"* ]]
-  rm -rf "$blocked_parent"
 }
 
 @test "runtime: --block on project subdir blocks access under blocked parent" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   require_runtime_sandbox
   local blocked_parent="/tmp/scode-fix10-rt-$$"
+  track_cleanup "$blocked_parent"
   local project_dir="$blocked_parent/myproject"
   local secret_dir="$project_dir/secrets"
   mkdir -p "$secret_dir"
@@ -646,5 +662,71 @@ YAML
   # The command should fail to read the secret file
   run "$SCODE" --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- cat secrets/key.txt
   [[ "$output" != *"topsecret"* ]]
-  rm -rf "$blocked_parent"
+}
+
+# ---------- P1: --block denies process-exec (not just file-read/write) ----------
+
+@test "dry-run: --block includes process-exec in deny rule" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --block /tmp/exec-block-test -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
+  [[ "$output" == *"/tmp/exec-block-test"* ]]
+}
+
+@test "dry-run: --strict --block includes process-exec in deny rule" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict --block /tmp/exec-block-strict -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
+  [[ "$output" == *"/tmp/exec-block-strict"* ]]
+}
+
+@test "dry-run: --strict --allow includes process-exec in allow rule" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local allow_dir="$TEST_PROJECT/exec-allow-strict"
+  mkdir -p "$allow_dir"
+  run "$SCODE" --dry-run --strict --allow "$allow_dir" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(allow file-read* file-write* process-exec"* ]]
+}
+
+@test "runtime: --block prevents execution of blocked binary" {
+  require_runtime_sandbox
+  local blocked_dir="/tmp/scode-exec-block-$$"
+  track_cleanup "$blocked_dir"
+  mkdir -p "$blocked_dir"
+  local fake_script="$blocked_dir/blocked-script.sh"
+  printf '#!/bin/bash\necho SHOULD_NOT_PRINT\n' > "$fake_script"
+  chmod +x "$fake_script"
+  run "$SCODE" --block "$blocked_dir" -C "$TEST_PROJECT" -- "$fake_script"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"SHOULD_NOT_PRINT"* ]]
+}
+
+@test "runtime: --strict --block prevents execution of blocked binary" {
+  require_runtime_sandbox
+  local blocked_dir="/tmp/scode-exec-block-strict-$$"
+  track_cleanup "$blocked_dir"
+  mkdir -p "$blocked_dir"
+  local fake_script="$blocked_dir/blocked-script.sh"
+  printf '#!/bin/bash\necho SHOULD_NOT_PRINT\n' > "$fake_script"
+  chmod +x "$fake_script"
+  run "$SCODE" --strict --block "$blocked_dir" -C "$TEST_PROJECT" -- "$fake_script"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"SHOULD_NOT_PRINT"* ]]
+}
+
+@test "runtime: --block denies exec of binary under blocked path via bash -c" {
+  require_runtime_sandbox
+  local blocked_dir="/tmp/scode-exec-bash-$$"
+  track_cleanup "$blocked_dir"
+  mkdir -p "$blocked_dir"
+  local fake_script="$blocked_dir/inner.sh"
+  printf '#!/bin/bash\necho SHOULD_NOT_PRINT\n' > "$fake_script"
+  chmod +x "$fake_script"
+  # Execute via bash -c to test that the sandbox blocks the inner exec
+  run "$SCODE" --block "$blocked_dir" -C "$TEST_PROJECT" -- bash -c "$fake_script"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"SHOULD_NOT_PRINT"* ]]
 }

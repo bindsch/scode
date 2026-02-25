@@ -126,6 +126,15 @@ load test_helper
   [[ "$output" != *"OPENAI_API_KEY=runtime-secret-value"* ]]
 }
 
+@test "--scrub-env ignores multiline value fragments that look like env keys" {
+  local crafted_value
+  crafted_value=$'line1\nAWS_FAKE=from-value-fragment'
+  OPENAI_API_KEY="$crafted_value" run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OPENAI_API_KEY"* ]]
+  [[ "$output" != *"AWS_FAKE"* ]]
+}
+
 # ---------- Known harness shortcuts ----------
 
 @test "known harness produces no warning" {

@@ -522,3 +522,36 @@ YAML
   [[ "$output" == *"--bind ${real_project}/secrets ${real_project}/secrets"* ]]
   [[ "$output" != *"--tmpfs ${real_project}/secrets/tokens"* ]]
 }
+
+# ---------- Linux command-binary auto-allow parity ----------
+
+@test "linux dry-run: config blocked dir auto-allows command binary file" {
+  local blocked_dir="$TEST_PROJECT/config-blocked-bin"
+  mkdir -p "$blocked_dir"
+  local fake_tool="$blocked_dir/mytool"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$fake_tool"
+  chmod +x "$fake_tool"
+  local real_tool
+  real_tool="$(realpath "$fake_tool")"
+  local config_file="$TEST_PROJECT/linux-command-binary-config.yaml"
+  cat > "$config_file" <<YAML
+blocked:
+  - ${blocked_dir}
+YAML
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- "$fake_tool"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ro-bind ${real_tool} ${real_tool}"* ]]
+}
+
+@test "linux dry-run: CLI --block suppresses command-binary auto-allow" {
+  local blocked_dir="$TEST_PROJECT/cli-blocked-bin"
+  mkdir -p "$blocked_dir"
+  local fake_tool="$blocked_dir/mytool"
+  printf '#!/usr/bin/env bash\ntrue\n' > "$fake_tool"
+  chmod +x "$fake_tool"
+  local real_tool
+  real_tool="$(realpath "$fake_tool")"
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --block "$blocked_dir" -C "$TEST_PROJECT" -- "$fake_tool"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"--ro-bind ${real_tool} ${real_tool}"* ]]
+}

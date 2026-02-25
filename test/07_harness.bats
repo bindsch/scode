@@ -125,6 +125,13 @@ load test_helper
   [[ "$output" == *"strict+claude"* ]]
 }
 
+@test "detect_harness: timeout --foreground claude (no duration positional)" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- timeout --foreground claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
 # ---------- Harness config dir mapping ----------
 
 @test "strict+claude auto-allows ~/.claude" {
@@ -449,4 +456,87 @@ YAML
   # After --, '30' is the command, not timeout's duration
   # So 'claude' won't be detected — verify graceful handling
   [[ "$status" -eq 0 ]]
+}
+
+# ---------- P1 regression: -p not a flag-with-value ----------
+
+@test "detect_harness: command -p claude — -p is boolean" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- command -p claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: time -p claude — -p is boolean" {
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- time -p claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+# ---------- P1 regression: bash -c -- "cmd" ----------
+
+@test "detect_harness: bash -c -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c -- "claude --version"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: sh -c -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- sh -c -- "claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: bash -lc -- claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -lc -- "claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+# ---------- P2 regression: exec and assignment prefixes ----------
+
+@test "detect_harness: exec claude detected via shell" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "exec claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: FOO=bar claude detected" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "FOO=bar claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: FOO=\"bar baz\" claude detected via shell" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "FOO=\"bar baz\" claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: FOO=bar_baz (no spaces) claude detected via shell" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  # Unquoted assignments without spaces work with simple word splitting
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "FOO=bar_baz claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: exec FOO=bar claude detected via shell" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "exec FOO=bar claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: multiple assignments before claude" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "A=1 B=2 claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
 }

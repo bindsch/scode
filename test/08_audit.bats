@@ -126,17 +126,17 @@ EOF
 
 # ---------- Log header includes allowed paths ----------
 
-@test "dry-run: log header mentions allowed paths" {
-  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+@test "runtime: --log records allowed metadata entries on macOS" {
+  require_runtime_sandbox
   local allow_dir="$TEST_PROJECT/log-header-allow"
   mkdir -p "$allow_dir"
-  local log_file
-  log_file="$(mktemp)"
-  run "$SCODE" --dry-run --allow "$allow_dir" --log "$log_file" -C "$TEST_PROJECT" -- true
+  local log_file="$TEST_PROJECT/log-with-allowed-darwin.log"
+  run "$SCODE" --allow "$allow_dir" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  # The dry-run output with --log should mention allowed paths in its profile
-  [[ "$output" == *"${allow_dir}"* ]] || [[ -f "$log_file" ]]
-  rm -f "$log_file"
+  # The log file should record the allowed path in its metadata
+  local real_allow
+  real_allow="$(cd "$allow_dir" && pwd -P)"
+  grep -q "# allowed:.*${real_allow}" "$log_file" || grep -q "\"allowed\".*${real_allow}" "$log_file"
 }
 
 @test "linux runtime: --log records allowed metadata entries" {
@@ -449,9 +449,12 @@ EOF
   PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
-  run grep "^# blocked: config ${config_block}$" "$log_file"
+  local config_block_resolved project_block_resolved
+  config_block_resolved="$(realpath "$(dirname "$config_block")")/$(basename "$config_block")"
+  project_block_resolved="$(realpath "$(dirname "$project_block")")/$(basename "$project_block")"
+  run grep "^# blocked: config ${config_block_resolved}$" "$log_file"
   [ "$status" -eq 0 ]
-  run grep "^# blocked: project ${project_block}$" "$log_file"
+  run grep "^# blocked: project ${project_block_resolved}$" "$log_file"
   [ "$status" -eq 0 ]
 }
 
@@ -809,6 +812,282 @@ EOF
   watch_output="$(cat "$out_file")"
   # Relative path should be resolved using the logged cwd
   [[ "$watch_output" == *"/home/testuser/project/src/secret.txt"* ]]
+}
+
+# ---------- Audit parser edge cases ----------
+
+@test "audit: deny with file-read* wildcard operation" {
+  local log_file="$TEST_PROJECT/audit-wildcard-op.log"
+  cat > "$log_file" <<'EOF'
+deny(file-read*) /path/with spaces
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/path/with spaces"* ]]
+}
+
+@test "audit: tool-prefixed path with spaces" {
+  local log_file="$TEST_PROJECT/audit-tool-spaces.log"
+  cat > "$log_file" <<'EOF'
+tool: /path/with spaces: Permission denied
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/path/with spaces"* ]]
+}
+
+@test "audit: empty line produces no output" {
+  local log_file="$TEST_PROJECT/audit-empty-line.log"
+  printf 'deny(file-read-data) /valid/path\n\n' > "$log_file"
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+}
+
+@test "audit: random noise line produces no false positive" {
+  local log_file="$TEST_PROJECT/audit-noise.log"
+  cat > "$log_file" <<'EOF'
+INFO: starting process
+DEBUG: loaded config
+deny(file-read-data) /real/denied/path
+random noise line with no pattern
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/real/denied/path"* ]]
+  [[ "$output" != *"random noise"* ]]
+  [[ "$output" != *"INFO"* ]]
+}
+
+@test "audit: metadata blocked with all source types" {
+  local log_file="$TEST_PROJECT/audit-all-sources.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-02-24T10:00:00-0800
+# blocked: default /home/user/.aws
+# blocked: platform /home/user/Library
+# blocked: config /opt/config/secrets
+# blocked: project /opt/project/private
+# blocked: cli /custom/cli-blocked
+#---
+deny(file-read-data) /home/user/.aws/credentials
+deny(file-read-data) /opt/config/secrets/key
+deny(file-read-data) /custom/cli-blocked/data
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"3 unique denied path(s)"* ]]
+  [[ "$output" == *"Blocked by scode defaults"* ]]
+  [[ "$output" == *"/home/user/.aws"* ]]
+  [[ "$output" == *"Blocked by custom policy"* ]]
+  [[ "$output" == *"/opt/config/secrets"* ]]
+  [[ "$output" == *"/custom/cli-blocked"* ]]
+}
+
+@test "audit: header without #--- delimiter stops at first non-comment" {
+  local log_file="$TEST_PROJECT/audit-no-delimiter.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-02-24T10:00:00-0800
+# cwd: /home/user/project
+# blocked: default /home/user/.aws
+deny(file-read-data) /home/user/.aws/credentials
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"Blocked by scode defaults"* ]]
+}
+
+@test "audit: cwd relative path resolution without header delimiter" {
+  local log_file="$TEST_PROJECT/audit-cwd-no-delim.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-02-24T10:00:00-0800
+# cwd: /home/user/project
+deny(file-read-data) ./src/secret.txt
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"/home/user/project/src/secret.txt"* ]]
+}
+
+# ---------- JSON log header ----------
+
+@test "--log produces file starting with #json:" {
+  require_runtime_sandbox
+  local log_file="$TEST_PROJECT/json-header.log"
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [ -f "$log_file" ]
+  # First line must start with #json:
+  local first_line
+  first_line="$(head -1 "$log_file")"
+  [[ "$first_line" == "#json:"* ]]
+}
+
+@test "--log JSON header contains valid JSON" {
+  require_runtime_sandbox
+  require_node
+  local log_file="$TEST_PROJECT/json-valid.log"
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [ -f "$log_file" ]
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  # Validate with node
+  run node -e "JSON.parse(process.argv[1])" "$json_line"
+  [ "$status" -eq 0 ]
+}
+
+@test "--log JSON header has expected fields" {
+  require_runtime_sandbox
+  require_node
+  local log_file="$TEST_PROJECT/json-fields.log"
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  # Check required fields exist
+  run node -e "
+    const d = JSON.parse(process.argv[1]);
+    if (d.version !== 1) throw new Error('bad version');
+    if (typeof d.session !== 'string') throw new Error('bad session');
+    if (typeof d.command !== 'string') throw new Error('bad command');
+    if (typeof d.cwd !== 'string') throw new Error('bad cwd');
+    if (!Array.isArray(d.blocked)) throw new Error('bad blocked');
+    if (!Array.isArray(d.allowed)) throw new Error('bad allowed');
+  " "$json_line"
+  [ "$status" -eq 0 ]
+}
+
+@test "--log JSON and legacy headers agree on command" {
+  require_runtime_sandbox
+  require_node
+  local log_file="$TEST_PROJECT/json-agree.log"
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- echo hello
+  [ "$status" -eq 0 ]
+  # Extract command from JSON
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  local json_cmd
+  json_cmd="$(node -e "process.stdout.write(JSON.parse(process.argv[1]).command)" "$json_line")"
+  # Extract command from legacy header
+  local legacy_cmd
+  legacy_cmd="$(grep '^# command: ' "$log_file" | head -1 | sed 's/^# command: //')"
+  [ "$json_cmd" = "$legacy_cmd" ]
+}
+
+@test "--log JSON blocked array contains --block entries" {
+  require_runtime_sandbox
+  require_node
+  local log_file="$TEST_PROJECT/json-blocked.log"
+  run "$SCODE" --log "$log_file" --block /custom/secrets -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  # Check that /custom/secrets appears in the blocked array with source "cli"
+  run node -e "
+    const d = JSON.parse(process.argv[1]);
+    const found = d.blocked.some(b => b.path === '/custom/secrets' && b.source === 'cli');
+    if (!found) throw new Error('cli block not found in JSON: ' + JSON.stringify(d.blocked));
+  " "$json_line"
+  [ "$status" -eq 0 ]
+}
+
+@test "linux runtime: --log produces JSON header" {
+  local fake_bin="$TEST_PROJECT/fake-bin"
+  local fake_bwrap="$fake_bin/bwrap"
+  local log_file="$TEST_PROJECT/linux-json.log"
+
+  mkdir -p "$fake_bin"
+  cat > "$fake_bwrap" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == "--" ]]; then
+    shift
+    exec "$@"
+  fi
+  shift
+done
+echo "missing -- separator" >&2
+exit 2
+EOF
+  chmod +x "$fake_bwrap"
+
+  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [ -f "$log_file" ]
+  local first_line
+  first_line="$(head -1 "$log_file")"
+  [[ "$first_line" == "#json:"* ]]
+}
+
+@test "json_escape handles backslashes, quotes, newlines, tabs" {
+  require_node
+  # We test json_escape indirectly by creating a log with special characters
+  # in the command. The JSON must be parseable by node.
+  require_runtime_sandbox
+  local log_file="$TEST_PROJECT/json-escape.log"
+  # Command with special chars (backslash and double-quote in args)
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- echo 'back\slash' 'quo"te'
+  [ "$status" -eq 0 ]
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  # Must be valid JSON even with special chars in command
+  run node -e "JSON.parse(process.argv[1])" "$json_line"
+  [ "$status" -eq 0 ]
+}
+
+@test "json_escape handles C0 control characters (backspace, form feed, etc.)" {
+  require_node
+  require_runtime_sandbox
+  local log_file="$TEST_PROJECT/json-escape-c0.log"
+  # Create a command containing C0 control chars: backspace (0x08) and form feed (0x0C)
+  local bs=$'\x08'
+  local ff=$'\x0c'
+  local bel=$'\x07'
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- echo "a${bs}b" "c${ff}d" "e${bel}f"
+  [ "$status" -eq 0 ]
+  local json_line
+  json_line="$(head -1 "$log_file" | sed 's/^#json://')"
+  # Must be valid JSON AND control chars must survive the round-trip
+  run node -e "
+    const d = JSON.parse(process.argv[1]);
+    const cmd = d.command;
+    if (!cmd.includes('\\b')) throw new Error('backspace not preserved');
+    if (!cmd.includes('\\f')) throw new Error('form feed not preserved');
+    if (!cmd.includes('\\u0007')) throw new Error('bell not preserved as \\\\u0007');
+    console.log('OK: control chars preserved');
+  " "$json_line"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"OK: control chars preserved"* ]]
+}
+
+@test "audit parses log with JSON header + legacy header correctly" {
+  local log_file="$TEST_PROJECT/audit-json-compat.log"
+  cat > "$log_file" <<'EOF'
+#json:{"version":1,"session":"2026-02-24T10:00:00-0800","command":"node index.js","cwd":"/home/user/project","blocked":[{"source":"default","path":"/home/user/.ssh"}],"allowed":["/tmp"]}
+# scode session: 2026-02-24T10:00:00-0800
+# command: node index.js
+# cwd: /home/user/project
+# blocked: default /home/user/.ssh
+# allowed: /tmp
+#---
+/home/user/.ssh/id_rsa: Permission denied
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"1 unique denied path(s)"* ]]
+  [[ "$output" == *"/home/user/.ssh"* ]]
+  [[ "$output" == *"Blocked by scode defaults"* ]]
+}
+
+@test "Makefile has test-js target" {
+  local makefile="$BATS_TEST_DIRNAME/../Makefile"
+  [[ -f "$makefile" ]]
+  grep -q "^test-js:" "$makefile"
 }
 
 # ---------- Packaging: make install/uninstall dry-run ----------

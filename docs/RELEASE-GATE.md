@@ -22,12 +22,15 @@ Use this checklist before tagging a new `scode` release.
   brew install bats-core   # or: apt install bats
   # Linter
   brew install shellcheck  # or: apt install shellcheck
+  # JS tests
+  brew install node        # or: apt install nodejs npm
+  npm install
   ```
 
 - [ ] Test suite passes:
 
   ```bash
-  make test
+  SCODE_REQUIRE_JS_TESTS=1 make test
   ```
 
 - [ ] Shell lint passes:
@@ -97,6 +100,7 @@ Use this checklist before tagging a new `scode` release.
   ```bash
   tmp="$(mktemp)"
   cat > "$tmp" <<'EOF'
+#json:{"version":1,"session":"2026-02-15T10:00:00-0800","command":"true","cwd":"/tmp","blocked":[{"source":"default","path":"/home/user/.aws"},{"source":"cli","path":"/opt/internal/secrets"}],"allowed":["/tmp/allowed-path"]}
 # scode session: 2026-02-15T10:00:00-0800
 # blocked: default /home/user/.aws
 # blocked: cli /opt/internal/secrets
@@ -105,6 +109,7 @@ Use this checklist before tagging a new `scode` release.
 deny(file-read-data) /home/user/.aws/credentials
 deny(file-read-data) /opt/internal/secrets/token
 EOF
+  head -1 "$tmp" | grep -q '^#json:'
   out="$(./scode audit "$tmp")"
   echo "$out" | grep -q "Blocked by scode defaults"
   echo "$out" | grep -q "Blocked by custom policy"
@@ -191,9 +196,47 @@ EOF
   make uninstall PREFIX=/tmp/scode-release-test
   ```
 
-## 7) Release notes/changelog
+## 7) Homebrew tap
+
+- [ ] Update the Homebrew formula in the `bindsch/homebrew-tap` repository:
+
+  ```bash
+  # In ~/Programming/homebrew-tap
+  # Update Formula/scode.rb tag to the new version
+  # Commit and push
+  ```
+
+- [ ] Verify the in-repo `Formula/scode.rb` tag matches the release target.
+
+## 8) Release notes/changelog
 
 - [ ] Move user-visible items from `## [Unreleased]` into a new release section:
   - `## [X.Y.Z] - YYYY-MM-DD`
 - [ ] Ensure `[Unreleased]` remains at the top for the next cycle.
 - [ ] Remove placeholder-only text for the released version and include concrete user-visible changes.
+
+## 9) GitHub releases
+
+Create GitHub releases **in chronological order** (oldest first) so that the
+`Latest` badge lands on the newest release. If you create them out of order,
+manually fix with `gh release edit <tag> --latest`.
+
+- [ ] Create the GitHub release for the new version **before** any backfill releases:
+
+  ```bash
+  gh release create vX.Y.Z --title "scode vX.Y.Z" --notes "..."
+  ```
+
+- [ ] Verify the new release is marked `Latest`:
+
+  ```bash
+  gh release list -R bindsch/scode
+  # The new version must show "Latest"
+  ```
+
+- [ ] If backfilling older releases, create them **after** the new release and
+  then re-mark the new release as latest:
+
+  ```bash
+  gh release edit vX.Y.Z --latest
+  ```

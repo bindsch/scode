@@ -7,6 +7,7 @@ NO_SANDBOX_JS="$BATS_TEST_DIRNAME/../lib/no-sandbox.js"
 # Use a real temp dir as the project directory so path validation passes
 setup() {
   TEST_PROJECT="$(mktemp -d)"
+  _EXTRA_CLEANUP_DIRS=()
   unset SCODE_CONFIG
   unset SCODE_NET
   unset SCODE_FS_MODE
@@ -14,6 +15,14 @@ setup() {
 
 teardown() {
   rm -rf "$TEST_PROJECT"
+  for _dir in "${_EXTRA_CLEANUP_DIRS[@]}"; do
+    rm -rf "$_dir"
+  done
+}
+
+# Register a directory for cleanup in teardown (safe even on test failure)
+track_cleanup() {
+  _EXTRA_CLEANUP_DIRS+=("$1")
 }
 
 require_node() {
