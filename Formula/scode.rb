@@ -1,7 +1,7 @@
 class Scode < Formula
   desc "Safe sandbox wrapper for AI coding harnesses"
   homepage "https://github.com/bindsch/scode"
-  url "https://github.com/bindsch/scode.git", tag: "v0.2.0", revision: "467b53761236d8647428ab73d7246f86426d38bb"
+  url "https://github.com/bindsch/scode.git", tag: "v0.3.0", revision: "2bfbc62b4dc048c32246623be3e5d7f3a4a1117b"
   license "MIT"
 
   head "https://github.com/bindsch/scode.git", branch: "main"
@@ -23,7 +23,7 @@ class Scode < Formula
     if build.head?
       assert_match(/^scode \d+\.\d+\.\d+$/, version_output)
     else
-      assert_equal "scode 0.2.0", version_output
+      assert_equal "scode 0.3.0", version_output
     end
     assert_path_exists lib/"scode/no-sandbox.js"
     assert_path_exists pkgshare/"LICENSE"
