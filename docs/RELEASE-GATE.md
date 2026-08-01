@@ -12,6 +12,10 @@ Use this checklist before tagging a new `scode` release.
   - `README.md`
 - [ ] Manual install section uses parameterized `VERSION` variable:
   - `README.md` — verify the example comment matches the release target
+- [ ] Packaging test expects the release version:
+  - `test/09_packaging.bats` — the `--version` assertion is a literal string
+- [ ] After tagging, repin the released commit SHA:
+  - `README.md` (`EXPECTED_COMMIT`, `COMMIT`) and `Formula/scode.rb` (`revision:`)
 
 ## 2) Automated checks
 

@@ -27,7 +27,7 @@ load test_helper
 
   run "$prefix/bin/scode" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "scode 0.2.0" ]
+  [ "$output" = "scode 0.3.0" ]
 
   printf 'user-owned\n' > "$prefix/share/scode/examples/unrelated.yaml"
 
