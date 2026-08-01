@@ -2,7 +2,8 @@
 # Copy to ~/.config/scode/sandbox.yaml
 #
 # Maximum lockdown for reviewing untrusted code or running untrusted tools.
-# Blocks SSH keys, GitHub CLI tokens, and cloud sync directories.
+# Built-in rules already block SSH keys, GitHub CLI tokens, and personal data.
+# This profile adds cloud-sync directories.
 # Network disabled, env scrubbed, strict mode, read-only project.
 
 strict: true
@@ -11,19 +12,11 @@ fs_mode: ro
 scrub_env: true
 
 blocked:
-  # SSH keys — not needed for code review
-  - ~/.ssh
-
   # Cloud sync
   - ~/Dropbox
   - ~/OneDrive
   - ~/Google Drive
   - ~/iCloud Drive
-
-  # Additional personal dirs (~/Videos is a Linux default; listed here for macOS)
-  - ~/Music
-  - ~/Movies
-  - ~/Videos
 
 allowed:
   # Nothing extra — this is paranoid mode

@@ -7,6 +7,38 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Known-harness support for Aider, Amp, Crush, Cursor Agent, GitHub Copilot CLI, Continue CLI, Kimi Code CLI, OpenHands CLI, Cline CLI, Kiro CLI, Auggie CLI, and Grok CLI.
+- Config-only `grok_defense: true` mode: forces strict/env-scrub for detected Grok, blocks project Git metadata and dotenv files, and pins current Grok collection, telemetry, sync, compatibility, updater, memory, subagent, tool-search, and web-fetch controls off.
+- Incident research and threat-model documentation in `docs/SECURITY-HARDENING.md`, plus `examples/sandbox-grok.yaml`.
+- A reproducible `make coverage` gate for both the Bash launcher and Node preload, with an 80% minimum.
+
+### Changed
+
+- Strict-mode harness auto-allow now supports multiple config/state paths, including file-based config such as `~/.aider.conf.yml`.
+- Refreshed default paths for OpenCode, Factory Droid, Qwen Code, Codemux, and Pi Coding Agent.
+- Expanded default protection to SSH/signing keys, cloud/container/IaC credentials, package/VCS tokens, password-manager/keyring data, personal media, and shell/database histories on all platforms.
+- Removed automatic macOS browser, cache, preferences, and Keychain carve-outs; `~/Library` stays blocked unless the user authorizes an exact subtree.
+- Expanded environment scrubbing to current AI/cloud/CI/package credentials and shell/runtime injection variables.
+- Project `.scode.yaml` policy is restrictive-only: it can add protections but cannot authorize paths or disable user/default controls.
+- Strict harness state is read-only, and `--trust untrusted` disables harness-state auto-allows.
+- JavaScript tests now require supported Node.js 22+; dependency installs are reproducible through the committed lockfile.
+- SSH-agent variables and sockets are denied by default; forwarding now requires an explicit path and environment opt-in.
+- Source/manual installation guidance now pins and verifies release artifacts; packaged installs include the license.
+
+### Fixed
+
+- Closed project-config, allow/block ordering, read-only, command auto-allow, synthetic `HOME`, runtime engine lookup, preload cleanup, and log symlink/terminal-injection bypasses.
+- Linux now fails closed when a deep custom block cannot be mounted; macOS strict temp access is limited to the caller's private runtime directory.
+- Logged runs forward termination signals and fail when requested logging cannot complete.
+- JSON audit headers preserve exact command argument boundaries in an `argv` array.
+- Chromium shell rewriting now handles shell `-c --`, newlines, brace/negation groups, nested wrappers, and `env` split-string/chdir forms without changing unrelated `shell: true` semantics.
+- Custom blocks can no longer be hidden by project, child-allow, command, or preload mounts; conflicting project-wide blocks fail closed.
+- Project configuration is pinned to a verified regular-file descriptor, rejects symbolic links/hard links, and is capped at 1 MiB.
+- Grok history/dotenv blocks are mandatory while defense mode is active and reject overlapping allows.
+- Shell rewriting now preserves nested single quotes, escaped separators, comments, absolute wrapper paths, and unsupported substitutions without corrupting commands.
+
 ## [0.2.0] - 2026-02-25
 
 ### Added

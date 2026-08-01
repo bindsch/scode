@@ -1,9 +1,10 @@
 {
   "private": true,
   "engines": {
-    "node": ">=18.13.0"
+    "node": "^22.0.0 || ^24.0.0 || ^26.0.0"
   },
   "devDependencies": {
-    "fast-check": "^3"
+    "c8": "^11.0.0",
+    "fast-check": "^4.9.0"
   }
 }

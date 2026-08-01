@@ -5,18 +5,15 @@
 #   - "blocked" adds to the default blocked list
 #   - "allowed" overrides blocks recursively (path + descendants),
 #     including defaults and your additions
-#   - scalar options (net, fs_mode, strict, scrub_env) set defaults
+#   - scalar options (net, fs_mode, strict, scrub_env, grok_defense) set defaults
 #
 # Priority: CLI flags > user config > project config > environment variables > built-in defaults
 #
 # Built-in defaults already block:
-#   ~/Documents, ~/Desktop, ~/Pictures, ~/Downloads
-#   ~/.aws, ~/.azure, ~/.config/gcloud, ~/.kube, ~/.docker
-#   ~/.gnupg, ~/.1password, ~/.op, ~/.password-store
-#   ~/.npmrc, ~/.netrc, ~/.git-credentials, ~/.pypirc
-#   ~/.gem/credentials, ~/.cargo/credentials.toml
-#   ~/.config/gh, ~/.config/hub
-#   ~/Library (macOS, with browser/keychain carve-outs)
+#   personal documents/media and shell/database histories
+#   ~/.ssh, ~/.gnupg, ~/.pki, password stores, and keyrings
+#   cloud/container/IaC credentials and package/VCS tokens
+#   ~/Library (macOS, without automatic credential carve-outs)
 #   + additional Linux-specific blocks (browser profiles, keyrings, etc.)
 #
 # See also:
@@ -24,6 +21,7 @@
 #   sandbox-paranoid.yaml - maximum lockdown for untrusted code
 #   sandbox-permissive.yaml - opens up dirs for trusted projects
 #   sandbox-cloud-eng.yaml - for cloud/infra engineers
+#   sandbox-grok.yaml - Grok collection and Git-history defense
 
 # Sandbox flags (uncomment to enable)
 # These act as defaults; CLI flags always win.
@@ -31,6 +29,7 @@
 # fs_mode: ro          # read-only project dir (same as --ro)
 # strict: true         # deny-default sandbox (same as --strict)
 # scrub_env: true      # strip API keys from env (same as --scrub-env)
+# grok_defense: true   # harden Grok collection and project-secret access
 
 # Block additional directories beyond defaults
 # Note: inline comments (space + #) are stripped from unquoted values.
@@ -38,7 +37,6 @@
 blocked:
   # - ~/Dropbox
   # - ~/OneDrive
-  # - ~/.ssh
 
 # Allow specific directories, overriding defaults
 allowed:

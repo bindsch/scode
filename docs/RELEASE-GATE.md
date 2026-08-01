@@ -11,7 +11,7 @@ Use this checklist before tagging a new `scode` release.
 - [ ] README beta/version banner matches:
   - `README.md`
 - [ ] Manual install section uses parameterized `VERSION` variable:
-  - `README.md` — verify the example comment (`e.g. v0.1.1`) matches the release target
+  - `README.md` — verify the example comment matches the release target
 
 ## 2) Automated checks
 
@@ -23,14 +23,16 @@ Use this checklist before tagging a new `scode` release.
   # Linter
   brew install shellcheck  # or: apt install shellcheck
   # JS tests
-  brew install node        # or: apt install nodejs npm
-  npm install
+  brew install node kcov   # use Node.js 22+; install equivalents on Linux
+  npm ci
   ```
 
 - [ ] Test suite passes:
 
   ```bash
-  SCODE_REQUIRE_JS_TESTS=1 make test
+  make test
+  make coverage
+  npm audit --audit-level=low
   ```
 
 - [ ] Shell lint passes:
@@ -193,6 +195,8 @@ EOF
   test -f /tmp/scode-release-test/share/scode/examples/sandbox-paranoid.yaml
   test -f /tmp/scode-release-test/share/scode/examples/sandbox-permissive.yaml
   test -f /tmp/scode-release-test/share/scode/examples/sandbox-cloud-eng.yaml
+  test -f /tmp/scode-release-test/share/scode/examples/sandbox-grok.yaml
+  test -f /tmp/scode-release-test/share/scode/LICENSE
   make uninstall PREFIX=/tmp/scode-release-test
   ```
 
@@ -207,6 +211,11 @@ EOF
   ```
 
 - [ ] Verify the in-repo `Formula/scode.rb` tag matches the release target.
+- [ ] Verify the formula's pinned `revision` resolves to the release tag commit.
+- [ ] Verify release tags are signed. If signing is not yet configured, publish
+  the exact commit ID and SHA-256 hashes for every manual-install artifact.
+- [ ] Verify GitHub branch/tag protection, secret scanning, and Dependabot are
+  enabled before publishing.
 
 ## 8) Release notes/changelog
 
@@ -217,9 +226,8 @@ EOF
 
 ## 9) GitHub releases
 
-Create GitHub releases **in chronological order** (oldest first) so that the
-`Latest` badge lands on the newest release. If you create them out of order,
-manually fix with `gh release edit <tag> --latest`.
+Create the target release first. If older releases must be backfilled afterward,
+explicitly re-mark the target release as latest.
 
 - [ ] Create the GitHub release for the new version **before** any backfill releases:
 

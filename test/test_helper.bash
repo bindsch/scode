@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Shared helpers for scode test suite
 
-SCODE="$BATS_TEST_DIRNAME/../scode"
+SCODE_SOURCE="$BATS_TEST_DIRNAME/../scode"
+SCODE="${SCODE_UNDER_TEST:-$SCODE_SOURCE}"
 NO_SANDBOX_JS="$BATS_TEST_DIRNAME/../lib/no-sandbox.js"
 
 # Use a real temp dir as the project directory so path validation passes
@@ -39,7 +40,7 @@ require_runtime_sandbox() {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
 
   # If sandbox-exec itself cannot run, this host cannot run runtime tests.
-  sandbox-exec -p '(version 1) (allow default)' true >/dev/null 2>&1 \
+  /usr/bin/sandbox-exec -p '(version 1) (allow default)' /usr/bin/true >/dev/null 2>&1 \
     || skip "runtime sandbox unavailable in this environment"
 
   # If the host sandbox works but scode probe fails, fail the test.
@@ -47,12 +48,26 @@ require_runtime_sandbox() {
   [ "$status" -eq 0 ]
 }
 
-linux_dry_run() {
-  _SCODE_PLATFORM=linux "$SCODE" --dry-run -C "$TEST_PROJECT" -- "$@"
+require_any_runtime_sandbox() {
+  case "$(uname -s)" in
+    Darwin)
+      require_runtime_sandbox
+      ;;
+    Linux)
+      [[ -x /usr/bin/bwrap ]] || skip "bubblewrap unavailable"
+      /usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc -- /usr/bin/true >/dev/null 2>&1 \
+        || skip "runtime sandbox unavailable in this environment"
+      run "$SCODE" -C "$TEST_PROJECT" -- true
+      [ "$status" -eq 0 ]
+      ;;
+    *)
+      skip "runtime sandbox unsupported on this platform"
+      ;;
+  esac
 }
 
-linux_runtime() {
-  _SCODE_PLATFORM=linux "$SCODE" -C "$TEST_PROJECT" -- "$@"
+linux_dry_run() {
+  _SCODE_PLATFORM=linux "$SCODE" --dry-run -C "$TEST_PROJECT" -- "$@"
 }
 
 darwin_dry_run() {
@@ -83,6 +98,7 @@ assert_project_read_only_output() {
   local project_real
   project_real="$(cd "$project_dir" && pwd -P)"
   [[ "$out" == *"(deny file-write*"* || \
+     ( "$out" == *"Project directory (read-only)"* && "$out" == *"(subpath \"${project_real}\")"* ) || \
      "$out" == *"--ro-bind ${project_dir} ${project_dir}"* || \
      "$out" == *"--ro-bind ${project_real} ${project_real}"* ]]
 }

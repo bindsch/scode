@@ -39,24 +39,21 @@ load test_helper
   [[ "$output" == *"command not found"* ]]
 }
 
-@test "errors when sandbox-exec is unavailable on darwin runtime path" {
+@test "runtime sandbox engine cannot be replaced through PATH" {
+  require_any_runtime_sandbox
   local fake_bin="$TEST_PROJECT/fake-bin"
-  local bash_bin
-  bash_bin="$(command -v bash)"
   mkdir -p "$fake_bin"
-  PATH="$fake_bin" _SCODE_PLATFORM=darwin run "$bash_bin" "$SCODE" -C "$TEST_PROJECT" -- /usr/bin/true
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"sandbox-exec not found"* ]]
+  printf '#!/bin/bash\nexit 99\n' > "$fake_bin/sandbox-exec"
+  printf '#!/bin/bash\nexit 99\n' > "$fake_bin/bwrap"
+  chmod +x "$fake_bin/sandbox-exec" "$fake_bin/bwrap"
+  PATH="$fake_bin:$PATH" run "$SCODE" -C "$TEST_PROJECT" -- /usr/bin/true
+  [ "$status" -eq 0 ]
 }
 
-@test "errors when bwrap is unavailable on linux runtime path" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local bash_bin
-  bash_bin="$(command -v bash)"
-  mkdir -p "$fake_bin"
-  PATH="$fake_bin" _SCODE_PLATFORM=linux run "$bash_bin" "$SCODE" -C "$TEST_PROJECT" -- /usr/bin/true
+@test "internal platform override is rejected for runtime execution" {
+  _SCODE_PLATFORM=linux run "$SCODE" -C "$TEST_PROJECT" -- /usr/bin/true
   [ "$status" -eq 1 ]
-  [[ "$output" == *"bwrap not found"* ]]
+  [[ "$output" == *"only permitted with --dry-run"* ]]
 }
 
 @test "dry-run: missing command does not error" {
@@ -182,25 +179,81 @@ load test_helper
   [[ "$output" == *"invalid path"* ]]
 }
 
+@test "rejects --allow path with tab control character" {
+  local bad_path
+  bad_path=$'/tmp/evil\tpath'
+  run "$SCODE" --dry-run --allow "$bad_path" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid path"* ]]
+}
+
+@test "rejects empty --allow path" {
+  run "$SCODE" --dry-run --allow "" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid path (empty)"* ]]
+}
+
+@test "rejects HOME root mount" {
+  HOME=/ run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"unsafe HOME"* ]]
+}
+
+@test "synthetic HOME still protects the account home" {
+  local fake_home="$TEST_PROJECT/synthetic-home"
+  mkdir "$fake_home"
+  HOME="$fake_home" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$HOME"* ]]
+}
+
+@test "rejects invalid internal platform override" {
+  _SCODE_PLATFORM=not-a-platform run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid internal platform override"* ]]
+}
+
+@test "relative command path resolves from --cwd" {
+  local caller_dir
+  caller_dir="$(mktemp -d)"
+  track_cleanup "$caller_dir"
+  printf '#!/bin/bash\necho caller\n' > "$caller_dir/tool"
+  printf '#!/bin/bash\necho project\n' > "$TEST_PROJECT/tool"
+  chmod +x "$caller_dir/tool" "$TEST_PROJECT/tool"
+  local project_real
+  project_real="$(realpath "$TEST_PROJECT")"
+
+  run bash -c 'cd "$1" && "$2" --dry-run -C "$3" -- ./tool' _ "$caller_dir" "$SCODE" "$TEST_PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"# Command: ${project_real}/tool"* || "$output" == *"-- ${project_real}/tool"* ]]
+  [[ "$output" != *"${caller_dir}/tool"* ]]
+}
+
+@test "runtime rejects shell builtins that are not executable files" {
+  case "$(uname -s)" in
+    Darwin) [[ -x /usr/bin/sandbox-exec ]] || skip "sandbox-exec unavailable" ;;
+    Linux) [[ -x /usr/bin/bwrap ]] || skip "bubblewrap unavailable" ;;
+    *) skip "unsupported platform" ;;
+  esac
+
+  run "$SCODE" -C "$TEST_PROJECT" -- source
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"command not found: source"* ]]
+}
+
 # ---------- expand_path tilde safety ----------
 
 @test "expand_path does not expand ~user form" {
   # ~root should NOT be expanded (we only expand ~/ and ~)
-  # This just verifies it does not crash; the actual path will
-  # fail directory validation, which is fine
   run "$SCODE" --dry-run --block "~root" -C "$TEST_PROJECT" -- true
-  # Should succeed (treating ~root as literal path) or fail with validation error
-  [[ "$status" -eq 0 || "$status" -eq 1 ]]
-  # Either way, ~root must NOT have been expanded to the root user's home
-  if [[ "$status" -eq 0 ]]; then
-    [[ "$output" != *"/var/root"* ]]
-    [[ "$output" != *"/root"* ]]
-  fi
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$TEST_PROJECT/~root"* ]]
+  [[ "$output" != *"/var/root"* ]]
 }
 
 # ---------- Block/allow hierarchy edge cases ----------
 
-@test "--block / suppresses descendant config allows" {
+@test "--block / fails closed because it covers the project" {
   local config_file="$TEST_PROJECT/root-block-config.yaml"
   cat > "$config_file" <<'YAML'
 allowed:
@@ -209,9 +262,8 @@ YAML
   local platform
   for platform in darwin linux; do
     _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" --block / -C "$TEST_PROJECT" -- true
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"(subpath \"/\")"* || "$output" == *"--tmpfs /"* ]]
-    [[ "$output" != *"/tmp/scode-root-allow"* ]]
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"custom block covers the project directory"* ]]
   done
 }
 
@@ -261,6 +313,18 @@ YAML
   run "$SCODE" --help
   [ "$status" -eq 0 ]
   [[ "$output" == *"Auto-Allow"* ]]
+}
+
+@test "help lists current harness shortcuts" {
+  run "$SCODE" --help
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"aider"* ]]
+  [[ "$output" == *"cursor-agent"* ]]
+  [[ "$output" == *"copilot"* ]]
+  [[ "$output" == *"cn"* ]]
+  [[ "$output" == *"kimi"* ]]
+  [[ "$output" == *"kiro-cli"* ]]
+  [[ "$output" == *"grok"* ]]
 }
 
 @test "help mentions --trust" {

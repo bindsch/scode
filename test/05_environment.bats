@@ -41,6 +41,12 @@ load test_helper
   [[ "$output" == *"--no-sandbox"* ]]
 }
 
+@test "similar CHROMIUM_FLAGS token does not suppress --no-sandbox" {
+  CHROMIUM_FLAGS="--no-sandbox-test" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CHROMIUM_FLAGS=--no-sandbox-test --no-sandbox"* ]]
+}
+
 @test "sets NODE_OPTIONS with no-sandbox preload" {
   require_runtime_sandbox
   local val
@@ -273,14 +279,129 @@ load test_helper
 
 # ---------- SSH scrub patterns ----------
 
-@test "--scrub-env scrubs SSH_AUTH_SOCK and SSH_AGENT_PID" {
+@test "SSH agent variables are removed before optional scrubbing" {
   export SSH_AUTH_SOCK="/tmp/ssh-agent.sock"
   export SSH_AGENT_PID="12345"
   run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"SSH_AUTH_SOCK"* ]]
-  [[ "$output" == *"SSH_AGENT_PID"* ]]
+  [[ "$output" != *"/tmp/ssh-agent.sock"* ]]
+  [[ "$output" != *"12345"* ]]
   unset SSH_AUTH_SOCK SSH_AGENT_PID
+}
+
+@test "SSH agent socket is blocked by default and requires double opt-in" {
+  require_node
+  require_any_runtime_sandbox
+  local socket_path="$TEST_PROJECT/agent.sock"
+  local ready_file="$TEST_PROJECT/agent.ready"
+  node -e '
+    const fs = require("fs");
+    const net = require("net");
+    const server = net.createServer(socket => socket.end("AGENT_OK\n"));
+    server.listen(process.argv[1], () => fs.writeFileSync(process.argv[2], "ready"));
+  ' "$socket_path" "$ready_file" &
+  local server_pid=$!
+  local i
+  for i in $(seq 1 100); do
+    [[ -S "$socket_path" && -f "$ready_file" ]] && break
+    sleep 0.02
+  done
+  [[ -S "$socket_path" ]]
+
+  local platform
+  for platform in darwin linux; do
+    SSH_AUTH_SOCK="$socket_path" _SCODE_PLATFORM="$platform" run \
+      "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"$socket_path"* ]]
+    if [[ "$platform" == "linux" ]]; then
+      [[ "$output" == *"--ro-bind /dev/null"* ]]
+    fi
+  done
+
+  SSH_AUTH_SOCK="$socket_path" run "$SCODE" -C "$TEST_PROJECT" -- \
+    /bin/bash -c 'test -z "${SSH_AUTH_SOCK:-}"'
+  [ "$status" -eq 0 ]
+
+  SSH_AUTH_SOCK="$socket_path" run "$SCODE" --allow "$socket_path" -C "$TEST_PROJECT" -- \
+    env SSH_AUTH_SOCK="$socket_path" node -e '
+      const net = require("net");
+      const socket = net.connect(process.env.SSH_AUTH_SOCK);
+      socket.on("data", data => process.stdout.write(data));
+      socket.on("error", error => { console.error(error.code); process.exit(12); });
+    '
+  local connect_status=$status
+  local connect_output="$output"
+  kill "$server_pid" 2>/dev/null || true
+  wait "$server_pid" 2>/dev/null || true
+  [ "$connect_status" -eq 0 ]
+  [[ "$connect_output" == *"AGENT_OK"* ]]
+}
+
+@test "sandboxed command does not inherit nonstandard caller descriptors" {
+  [[ -n "${SCODE_COVERAGE_TARGET:-}" ]] && skip "coverage harness requires its own descriptor"
+  require_any_runtime_sandbox
+  local descriptor_file="$TEST_PROJECT/inherited-fd-secret"
+  printf 'descriptor-secret\n' > "$descriptor_file"
+  exec 7<"$descriptor_file"
+  run "$SCODE" -C "$TEST_PROJECT" -- /bin/bash -c '
+    if { : <&7; } 2>/dev/null; then
+      echo FD_STILL_OPEN
+      exit 9
+    fi
+    echo FD_CLOSED
+  '
+  local child_status=$status
+  local child_output="$output"
+  exec 7<&-
+  [ "$child_status" -eq 0 ]
+  [[ "$child_output" == *"FD_CLOSED"* ]]
+  [[ "$child_output" != *"FD_STILL_OPEN"* ]]
+}
+
+@test "--scrub-env removes current provider, package, and startup-injection vars" {
+  export XAI_API_KEY="xai-secret"
+  export GEMINI_API_KEY="gemini-secret"
+  export OPENROUTER_API_KEY="openrouter-secret"
+  export NODE_AUTH_TOKEN="npm-secret"
+  export CARGO_REGISTRY_TOKEN="cargo-secret"
+  export BASH_ENV="/tmp/hostile-bash-env"
+  export NODE_OPTIONS="--require=/tmp/hostile.js"
+  export GIT_CONFIG_COUNT="1"
+  run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"XAI_API_KEY"* ]]
+  [[ "$output" == *"GEMINI_API_KEY"* ]]
+  [[ "$output" == *"OPENROUTER_API_KEY"* ]]
+  [[ "$output" == *"NODE_AUTH_TOKEN"* ]]
+  [[ "$output" == *"CARGO_REGISTRY_TOKEN"* ]]
+  # BASH_ENV is removed before any child shell starts, so it is absent even
+  # from the later scrub summary.
+  [[ "$output" != *"hostile-bash-env"* ]]
+  [[ "$output" == *"NODE_OPTIONS"* ]]
+  [[ "$output" == *"GIT_CONFIG_COUNT"* ]]
+  unset XAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY NODE_AUTH_TOKEN
+  unset CARGO_REGISTRY_TOKEN BASH_ENV NODE_OPTIONS GIT_CONFIG_COUNT
+}
+
+@test "grok defense pins collection controls even for nested launches" {
+  local config_file="$TEST_PROJECT/grok-defense-env.yaml"
+  cat > "$config_file" <<'YAML'
+grok_defense: true
+YAML
+
+  GROK_TELEMETRY_ENABLED=true \
+  GROK_TELEMETRY_TRACE_UPLOAD=true \
+  GROK_WORKSPACE_DATA_COLLECTION_DISABLED=false \
+    run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"GROK_TELEMETRY_ENABLED=false"* ]]
+  [[ "$output" == *"GROK_TELEMETRY_TRACE_UPLOAD=false"* ]]
+  [[ "$output" == *"GROK_WORKSPACE_DATA_COLLECTION_DISABLED=true"* ]]
+  [[ "$output" == *"GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED=false"* ]]
+  [[ "$output" == *"GROK_RELAY_SYNC_ENABLED=false"* ]]
+  [[ "$output" == *"GROK_RESPECT_GITIGNORE=1"* ]]
+  [[ "$output" == *"GROK_DISABLE_AUTOUPDATER=1"* ]]
 }
 
 # ---------- Portable date format in log ----------

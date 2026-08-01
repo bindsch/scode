@@ -2,7 +2,7 @@
 
 > **Beta software (v0.2.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
-scode wraps AI coding tools (Claude, Codex, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
+scode wraps AI coding tools (Claude, Codex, Aider, Grok, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
 ## Quickstart
 
@@ -26,11 +26,11 @@ AI coding CLIs are starting to ship built-in sandboxes. A few third-party wrappe
 
 **One policy, all agents.** scode is agent-agnostic. One config, one set of rules, consistent across Claude, Codex, OpenCode, Goose, Gemini, or anything else you run. Audit one boundary, not five.
 
-**Zero infrastructure.** Single bash script. No daemon, no proxy, no container, no language runtime. Works on a fresh macOS machine with nothing installed, or any Linux box with bubblewrap.
+**Zero infrastructure.** Single bash script. No daemon, no proxy, no container, no language runtime for the core wrapper. Uses the system sandbox on tested macOS versions or `bubblewrap` on tested Debian/Ubuntu releases.
 
-**Batteries included.** Blocks credentials, cloud tokens, password managers, and personal files across 20+ paths out of the box (35+ on Linux with platform-specific extras). Chromium double-sandbox issues handled automatically. Environment scrubbing strips 30 token patterns (including wildcards like `AWS_*`).
+**Batteries included.** Blocks SSH and signing keys, cloud/container/IaC credentials, package tokens, password managers, personal media, and shell histories by default. Chromium double-sandbox issues are handled automatically. Environment scrubbing covers cloud, AI, CI/CD, package, SSH-agent, and process-injection variables.
 
-**YOLO mode safety net.** Running with `--dangerously-skip-permissions` or auto-accepting tool calls? scode lets you do that without less worry. The harness can write code and run commands freely inside your project, but it still cannot touch your cloud credentials, password managers, or personal documents. Accept permissions more liberally knowing the blast radius is capped.
+**YOLO mode safety net.** Running with `--dangerously-skip-permissions` or auto-accepting tool calls? scode still enforces its filesystem and network boundary in the kernel. This limits access to protected host data, but the harness can still damage a writable project or exfiltrate any readable project data while network access is enabled.
 
 **Config-driven profiles.** YAML configs let you maintain separate security postures — daily driver, paranoid review, cloud engineering — and switch with `--config`.
 
@@ -54,15 +54,21 @@ brew install bindsch/tap/scode
 ### From source
 
 ```bash
-git clone https://github.com/bindsch/scode.git
+EXPECTED_COMMIT="467b53761236d8647428ab73d7246f86426d38bb" # v0.2.0
+git clone --filter=blob:none https://github.com/bindsch/scode.git
 cd scode
+git checkout --detach "$EXPECTED_COMMIT"
+test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
 sudo make install
 ```
+
+Release tags are currently unsigned. Pin and verify the documented commit as
+shown; do not install directly from a mutable branch.
 
 Install to a different prefix (no sudo needed):
 
 ```bash
-make install PREFIX=~/.local
+make install PREFIX="$HOME/.local"
 ```
 
 Uninstall:
@@ -74,17 +80,28 @@ sudo make uninstall
 If you installed with a custom prefix, use the same prefix for uninstall:
 
 ```bash
-make uninstall PREFIX=~/.local
+make uninstall PREFIX="$HOME/.local"
 ```
 
 ### Manual
 
 ```bash
-VERSION="vX.Y.Z"  # set to the release tag you want, e.g. v0.2.0
-curl -fsSL "https://raw.githubusercontent.com/bindsch/scode/${VERSION}/scode" -o /usr/local/bin/scode
-chmod +x /usr/local/bin/scode
-mkdir -p /usr/local/lib/scode
-curl -fsSL "https://raw.githubusercontent.com/bindsch/scode/${VERSION}/lib/no-sandbox.js" -o /usr/local/lib/scode/no-sandbox.js
+COMMIT="467b53761236d8647428ab73d7246f86426d38bb" # v0.2.0
+tmp="$(mktemp -d)"
+base="https://raw.githubusercontent.com/bindsch/scode/${COMMIT}"
+curl -fsSLo "$tmp/scode" "$base/scode"
+curl -fsSLo "$tmp/no-sandbox.js" "$base/lib/no-sandbox.js"
+curl -fsSLo "$tmp/LICENSE" "$base/LICENSE"
+(cd "$tmp" && printf '%s  %s\n' \
+  feeb293f6bb456f20c2412a3901da116d3fe3927d82321384f53f82ef424cac7 scode \
+  02fa5495203d31bc96189ec02965fce69e364e406a44e784119c515b7bf6845f no-sandbox.js \
+  60e0aac1186a0ea1be7c13e1cc7a8475100fae5572abc23bbad33e3cdfa726dd LICENSE \
+  | shasum -a 256 -c -)
+sudo install -d /usr/local/bin /usr/local/lib/scode /usr/local/share/scode
+sudo install -m 755 "$tmp/scode" /usr/local/bin/scode
+sudo install -m 644 "$tmp/no-sandbox.js" /usr/local/lib/scode/no-sandbox.js
+sudo install -m 644 "$tmp/LICENSE" /usr/local/share/scode/LICENSE
+rm -rf "$tmp"
 ```
 
 ### Linux prerequisite
@@ -142,21 +159,51 @@ scode -- npm test                  # run any command in sandbox
 scode --ro opencode                # read-only project directory
 scode --allow ~/Documents claude   # unblock a default-blocked dir
 scode -n goose                     # no network access
-scode --strict claude              # deny-default; auto-allows ~/.claude + macOS Library
-scode --trust untrusted codex      # maximum lockdown (strict + no-net + scrub + ro)
+scode --strict claude              # deny-default; reads ~/.claude but cannot modify it
+scode --trust untrusted codex      # maximum lockdown; no harness-state auto-allow
 scode --trust trusted gemini       # minimal sandbox (rw, net on)
 scode --scrub-env claude           # strip API keys from env
 scode --config examples/sandbox-paranoid.yaml opencode  # use a specific config
 scode --log session.log codex      # log denials for review
 scode audit session.log            # parse denials, suggest --allow flags
 scode audit --watch session.log    # live-tail denials in real-time
+scode --config examples/sandbox-grok.yaml grok  # Grok collection defense
 ```
 
 ### Known harnesses
 
-These commands are recognized without needing `--`:
+These commands are recognized without needing `--`. In strict mode, scode also
+auto-allows their default user config and state paths **read-only**. The
+`untrusted` preset disables these automatic openings entirely.
 
-`opencode`, `claude`, `codex`, `goose`, `gemini`, `droid`, `qwen`, `codemux`, `pi`
+| Harness | Command | Default auto-allowed paths |
+|---------|---------|----------------------------|
+| OpenCode | `opencode` | `~/.config/opencode`, `~/.local/share/opencode` |
+| Claude Code | `claude` | `~/.claude` |
+| Codex CLI | `codex` | `~/.codex` |
+| Goose | `goose` | `~/.config/goose` |
+| Gemini CLI | `gemini` | `~/.gemini` |
+| Factory Droid | `droid` | `~/.factory` |
+| Qwen Code | `qwen` | `~/.qwen` |
+| Codemux | `codemux` | `~/.codemux`, `~/.config/codemux` (legacy) |
+| Pi Coding Agent | `pi` | `~/.pi/agent` |
+| Aider | `aider` | `~/.aider`, `~/.aider.conf.yml` |
+| Amp | `amp` | `~/.config/amp`, `~/.amp` |
+| Crush | `crush` | `~/.config/crush`, `~/.local/share/crush` |
+| Cursor Agent | `cursor-agent` | `~/.cursor` |
+| GitHub Copilot CLI | `copilot` | `~/.copilot`, `~/.cache/copilot` (Linux) |
+| Continue CLI | `cn` | `~/.continue` |
+| Kimi Code CLI | `kimi` | `~/.kimi-code`, `~/.kimi` (legacy) |
+| OpenHands CLI | `openhands` | `~/.openhands` |
+| Cline CLI | `cline` | `~/.cline` |
+| Kiro CLI | `kiro-cli` | `~/.kiro` |
+| Auggie CLI | `auggie` | `~/.augment` |
+| Grok CLI | `grok` | `~/.grok` |
+
+If a harness is configured to use a custom user directory, add that path with
+`--allow` when using strict mode. Environment-controlled roots such as `GROK_HOME`
+are deliberately not auto-allowed because a hostile value such as `/` would
+collapse the strict boundary.
 
 Unknown commands still run but produce a warning that sandbox behavior has not been tested.
 
@@ -196,34 +243,32 @@ This is equivalent to:
 scode --strict --no-net --scrub-env --ro goose
 ```
 
-For further hardening, add explicit blocks:
+SSH keys, signing keys, cloud credentials, package tokens, and common histories are already blocked. Add only policy specific to your environment:
 
 ```bash
-scode --trust untrusted --block ~/.ssh codex
+scode --trust untrusted --block ~/Company-Secrets codex
 ```
 
 Use Linux equivalents where paths differ.
 
-**Harness auto-allow:** When `--strict` detects a known harness as the command binary (or behind transparent wrappers such as `env`, `nice`, `timeout`, `command`, `stdbuf`, `ionice`, `taskset`, or shell `-c` wrappers), it automatically allows:
+**Harness auto-allow:** When `--strict` detects a known harness as the command binary (or behind transparent wrappers such as `env`, `nice`, `timeout`, `command`, `stdbuf`, `ionice`, `taskset`, or shell `-c` wrappers), it automatically allows read-only access to:
 
-- The harness config directory (e.g. `~/.claude` for claude, `~/.config/opencode` for opencode)
-- macOS `~/Library` browser carve-outs (`Application Support`, `Caches`, `Preferences`, `Saved Application State`) — read-write
-- macOS `~/Library/Keychains` — read-only
+- The harness config and state paths listed above
 
-This means `scode --strict claude` works out of the box. No manual `--allow` flags needed for the harness itself.
+This means `scode --strict claude` can read `~/.claude` but cannot modify it. It does not reopen browser profiles, Keychains, or broad macOS `~/Library` subtrees. `scode --trust untrusted claude` does not expose `~/.claude` at all unless the caller explicitly uses `--allow`.
 
 Detection is conservative: only the command binary (or the binary behind supported transparent wrappers) triggers auto-allow. Harness names appearing as arguments do not — `scode --strict -- echo claude` does not auto-allow `~/.claude`.
 
-To suppress a specific auto-allow, use `--block`:
+To suppress a specific harness-state auto-allow, use `--block`:
 
 ```bash
-scode --strict --block ~/Library/Keychains claude
+scode --strict --block ~/.claude claude
 ```
 
 For unknown commands or additional paths, add `--allow` manually:
 
 ```bash
-scode --strict --allow ~/.ssh -- npm test
+scode --strict --allow /path/to/build-cache -- npm test
 ```
 
 If an `--allow` path does not exist in strict mode, scode warns and does **not** create it. Create the directory yourself first.
@@ -232,17 +277,22 @@ If an `--allow` path does not exist in strict mode, scode warns and does **not**
 > It contains sockets (Wayland, PulseAudio, D-Bus) that expand attack surface. If a tool
 > needs it, add `--allow /run/user/$UID` explicitly.
 
+`--no-net` removes IP networking and omits the default runtime-directory bind on
+Linux. Nonstandard inherited descriptors are closed before launch, but standard
+input/output/error and an explicitly allowed pathname Unix socket remain
+authority channels.
+
 ## Configuration
 
 Optional config file at `~/.config/scode/sandbox.yaml`. Entries are merged with built-in defaults:
 
 - `blocked:` adds to the default blocked list
 - `allowed:` overrides blocks recursively (the path and all descendants), including defaults and your additions
-- Scalar options (`net`, `fs_mode`, `strict`, `scrub_env`) set defaults that CLI flags can override
+- Scalar options (`net`, `fs_mode`, `strict`, `scrub_env`, `grok_defense`) set defaults
 
 ### Project config
 
-A `.scode.yaml` file in the project root (the `--cwd` directory) is loaded with lower priority than the user config. Same format. This lets you ship per-project sandbox policies:
+A `.scode.yaml` file in the project root (the `--cwd` directory) is treated as untrusted input. It may tighten the policy by adding blocks, disabling network, enabling strict/env-scrub/Grok defense, or making the project read-only. It cannot add authoritative `allowed:` paths or turn protections off.
 
 ```yaml
 # .scode.yaml — project-specific sandbox config
@@ -250,12 +300,10 @@ strict: true
 blocked:
   - ~/Dropbox
 allowed:
-  - ./data    # relative to project dir
+  - ./data    # ignored unless the user or CLI already authorizes it
 ```
 
-Priority: CLI flags > user config (`~/.config/scode/sandbox.yaml`) > project config (`.scode.yaml`) > environment variables > built-in defaults. This priority is strict: user config `strict: false` overrides project config `strict: true`, and user config `net: off` overrides project config `net: on`.
-
-**Security note:** Project configs are untrusted by default. If a `.scode.yaml` `allowed:` entry would unblock a default-protected path (e.g. `~/Documents`, `~/.aws`), scode emits a warning to the terminal. This makes it visible when a cloned repo tries to weaken your sandbox. User config and CLI flags always take precedence.
+Priority is CLI flags > user config > restrictive project config > environment variables > built-in defaults. Permissive project values are ignored with a warning. A user config can still make an intentional exception.
 
 ```yaml
 # Sandbox flags (act as defaults; CLI flags always win)
@@ -280,6 +328,51 @@ allowed:
 | `fs_mode` | `rw`, `ro` | `--ro` / `--rw` |
 | `strict` | `true`, `false` | `--strict` |
 | `scrub_env` | `true`, `false` | `--scrub-env` |
+| `grok_defense` | `true`, `false` | Config-only incident defense |
+
+## Grok CLI defense
+
+The July 2026 Grok Build incident showed two separate outbound paths: ordinary model requests could contain file contents, while a collector created and uploaded a Git bundle containing all tracked files and history. The latter happened independently of the model's file reads. The public reproduction also found that the in-product privacy opt-out controlled retention, not whether trace traffic left the machine.
+
+Enable scode's defense with one user-config setting:
+
+```yaml
+# ~/.config/scode/sandbox.yaml
+grok_defense: true
+```
+
+Then run `scode grok`. For a directly detected Grok command, the mode:
+
+- forces strict mode and environment scrubbing;
+- kernel-blocks the project's `.git`, `.grok`, and common `.env` files;
+- pins Grok telemetry, trace upload, workspace collection/queue, and relay sync off;
+- enables Git-ignore respect and disables auto-update, compatibility scanners, memory, subagents, tool search, and web fetch;
+- refuses `/` or either effective/account home as the project root.
+
+The environment pins also protect a nested Grok process, but strict mode and project-file blocks require scode to detect `grok` as the command (directly or through a supported wrapper). `XAI_API_KEY` is scrubbed, so use Grok's interactive/OAuth login with this mode.
+
+For a persistent vendor-side veto, add this separately to `~/.grok/requirements.toml` (or centrally to `/etc/grok/requirements.toml`, which has higher precedence):
+
+```toml
+[harness]
+disable_codebase_upload = true
+
+[features]
+telemetry = false
+
+[telemetry]
+trace_upload = false
+
+[tools]
+respect_gitignore = true
+
+[cli]
+auto_update = false
+```
+
+`disable_codebase_upload`, telemetry, and trace-upload are defense-in-depth controls observed in current/recent Grok builds, not a substitute for scode's filesystem boundary. Re-run `grok inspect` and a canary network test after upgrades because the original incident was stopped by a server-side flag and no public root-cause advisory has been published.
+
+**Hard limit:** a cloud CLI needs network access to work. Any project file Grok is allowed to read may be sent as inference input. `net: off` blocks normal IP exfiltration and cloud use, but standard streams or explicitly allowed local sockets remain outside that guarantee. See [Security hardening and research](docs/SECURITY-HARDENING.md) for incident evidence, threat model, and sources.
 
 ### Example configs
 
@@ -301,7 +394,7 @@ scode --config "$(brew --prefix)/share/scode/examples/sandbox-paranoid.yaml" gem
 scode --config /usr/local/share/scode/examples/sandbox-paranoid.yaml opencode
 ```
 
-Manual install of just `scode` + `no-sandbox.js` does not include examples; use the repo files directly or download them from GitHub.
+Manual install does not include examples; use the pinned repo files directly.
 
 | File | Use case |
 |------|----------|
@@ -310,97 +403,46 @@ Manual install of just `scode` + `no-sandbox.js` does not include examples; use 
 | [`sandbox-paranoid.yaml`](examples/sandbox-paranoid.yaml) | Maximum lockdown for untrusted code review |
 | [`sandbox-permissive.yaml`](examples/sandbox-permissive.yaml) | Opens up dirs for trusted projects (docs, datasets) |
 | [`sandbox-cloud-eng.yaml`](examples/sandbox-cloud-eng.yaml) | Cloud/infra engineers: allows kubectl/Docker/Helm config dirs |
+| [`sandbox-grok.yaml`](examples/sandbox-grok.yaml) | Grok CLI collection and Git-history defense |
 
 ## Default protections
 
-### Directories blocked on all platforms
+### Paths blocked on all platforms
 
-**Personal files:**
-
-| Directory | Reason |
-|-----------|--------|
-| `~/Documents` | Personal documents |
-| `~/Desktop` | Desktop files |
-| `~/Pictures` | Photos |
-| `~/Downloads` | Downloaded files |
-
-**Cloud credentials:**
-
-| Directory | Reason |
-|-----------|--------|
-| `~/.aws` | AWS credentials and config |
-| `~/.azure` | Azure CLI tokens |
-| `~/.config/gcloud` | Google Cloud credentials |
-| `~/.kube` | Kubernetes config |
-| `~/.docker` | Docker registry auth |
-
-**Cryptographic keys and password managers:**
-
-| Directory | Reason |
-|-----------|--------|
-| `~/.gnupg` | GPG private keys |
-| `~/.1password` | 1Password data |
-| `~/.op` | 1Password CLI tokens |
-| `~/.password-store` | `pass` password store |
-
-**Auth tokens:**
-
-| Directory | Reason |
-|-----------|--------|
-| `~/.npmrc` | npm registry tokens |
-| `~/.netrc` | Generic credentials (curl, git, heroku) |
-| `~/.git-credentials` | Git credential store |
-| `~/.pypirc` | PyPI registry tokens |
-| `~/.gem/credentials` | RubyGems API key |
-| `~/.cargo/credentials.toml` | Cargo/crates.io token |
-| `~/.config/gh` | GitHub CLI tokens |
-| `~/.config/hub` | Hub CLI tokens |
+| Category | Representative protected paths |
+|---|---|
+| Personal data | `~/Documents`, `~/Desktop`, `~/Pictures`, `~/Downloads`, `~/Music`, `~/Movies`, `~/Videos` |
+| Private keys | `~/.ssh`, `~/.gnupg`, `~/.pki` |
+| Cloud/container/IaC | AWS, Azure, GCP, Kubernetes, Docker/containers, OCI, Terraform, Pulumi, Helm, DigitalOcean, Rclone, SOPS age, Vercel, Netlify, Railway, Fly, Hetzner |
+| Password stores/keyrings | 1Password, `pass`, Bitwarden CLI/data, Linux keyrings and KWallet |
+| Package/VCS credentials | npm, Yarn, Bun, netrc, Git/GitHub/GitLab, PyPI/pip/Poetry, RubyGems, Cargo, Maven, Gradle, NuGet, Composer, Hugging Face |
+| Histories | Bash, Zsh, Python, MySQL, PostgreSQL, and SQLite histories |
 
 ### What is NOT blocked
 
-- **`~/.ssh`** -- SSH keys are needed for git operations. Not blocked by default. Use `--block ~/.ssh` if you want to block it.
 - **Your project directory** -- full read-write access (or read-only with `--ro`).
 - **Network** -- fully open by default (disable with `-n`).
-- **`~/.claude`**, **`~/.config`** (except gcloud/gh/hub; Linux also blocks additional subdirs — see below), **`~/.local`** (except Linux keyrings), **`~/.cargo`** (except credentials.toml), etc.
+- **Harness state outside strict mode** -- for example `~/.claude` or `~/.codex`, unless separately blocked.
 - All system paths (`/usr`, `/bin`, `/System`, etc.) and temp directories.
 
 If you do not want this allow-first baseline, use strict mode: `scode --strict ...` or `scode --trust untrusted ...`.
 
 ### macOS: ~/Library
 
-`~/Library` is blocked wholesale, with specific carve-outs:
+`~/Library` is blocked wholesale with no automatic browser, cache, preference, or Keychain carve-outs. Browser profiles contain cookies and bearer sessions; read-only access can still be enough to steal them. If a harness needs one subdirectory, authorize that exact subtree instead of the whole Library:
 
-**Read-write** (browsers/tools need these):
-
-| Subdirectory | Reason |
-|---|---|
-| `~/Library/Application Support` | Browser profiles (Chrome, Brave, Edge) |
-| `~/Library/Caches` | Browser and tool caches |
-| `~/Library/Preferences` | plist config files |
-| `~/Library/Saved Application State` | Window restore |
-
-**Read-only** (tools can read, sandbox cannot modify):
-
-| Subdirectory | Reason |
-|---|---|
-| `~/Library/Keychains` | Auth tokens (e.g. Claude's OAuth). Read-only so nothing in the sandbox can modify your keychain. |
-
-Everything else in `~/Library` (Mail, Messages, Cookies, Safari, Contacts, Photos, etc.) is denied. New or unknown subdirectories are blocked by default.
-
-To fully unblock: `scode --allow ~/Library opencode`
+```bash
+scode --allow "$HOME/Library/Application Support/SpecificTool" opencode
+```
 
 ### Linux: additional blocks
 
-On Linux, scode blocks additional directories beyond the cross-platform defaults:
+On Linux, scode additionally protects browser/email profiles and application sandboxes:
 
 | Category | Directories |
 |---|---|
-| Cloud credentials | `~/.config/doctl`, `~/.config/helm`, `~/.terraform.d` |
-| Password managers / keyrings | `~/.config/Bitwarden CLI`, `~/.config/Bitwarden`, `~/.local/share/keyrings`, `~/.local/share/kwalletd` |
-| Auth tokens | `~/.config/pip`, `~/.config/git/credentials` |
 | Browser profiles | `~/.mozilla`, `~/.config/google-chrome`, `~/.config/chromium`, `~/.config/BraveSoftware` |
 | Email / messaging | `~/.thunderbird`, `~/.config/Signal` |
-| Personal files | `~/Videos` |
 | App sandboxes | `~/.var/app` (Flatpak), `~/snap` |
 
 ### Always blocked (both modes)
@@ -409,9 +451,14 @@ On Linux, scode blocks additional directories beyond the cross-platform defaults
 
 ## `--scrub-env`
 
-When enabled, strips these environment variables before the command runs (not on by default):
+When enabled, strips sensitive environment families before the command runs (not on by default):
 
-`AWS_*`, `AZURE_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `DO_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `COHERE_API_KEY`, `MISTRAL_API_KEY`, `REPLICATE_API_TOKEN`, `TOGETHER_API_KEY`, `GROQ_API_KEY`, `FIREWORKS_API_KEY`, `DEEPSEEK_API_KEY`, `GITHUB_TOKEN`, `GH_TOKEN`, `GITLAB_*_TOKEN`, `VERCEL_TOKEN`, `NETLIFY_AUTH_TOKEN`, `VAULT_TOKEN`, `PULUMI_ACCESS_TOKEN`, `CLOUDFLARE_API_TOKEN`, `SENTRY_AUTH_TOKEN`, `SNYK_TOKEN`, `NPM_TOKEN`, `DOCKER_PASSWORD`, `DOCKER_AUTH_CONFIG`, `SSH_AUTH_SOCK`, `SSH_AGENT_PID`
+- cloud and infrastructure credentials (`AWS_*`, `AZURE_*`, Google/OCI/DigitalOcean, Kubernetes, Vault, Pulumi, Terraform/TFC, Cloudflare);
+- AI provider keys (OpenAI, Anthropic, xAI, Gemini, OpenRouter, Hugging Face, Cohere, Mistral, and others);
+- VCS, CI/CD, deployment, package-registry, Docker, database URL, and SSH-agent credentials;
+- process/startup injection controls such as `BASH_ENV`, `ENV`, `ZDOTDIR`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, Python/Ruby/Perl/Java startup options, and Git config/askpass overrides.
+
+The exact patterns are maintained in `SCRUB_PATTERNS` in the `scode` script. Grok defense turns scrubbing on automatically for a detected Grok command.
 
 ## `scode audit`
 
@@ -432,7 +479,7 @@ scode --log session.log --strict codex
 scode audit --watch session.log
 ```
 
-Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. New logs begin with a machine-readable `#json:` header line, followed by legacy `# ...` metadata lines for compatibility. Recognized denial formats:
+Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. New logs begin with a machine-readable `#json:` header line, including an exact `argv` array, followed by legacy `# ...` metadata lines for compatibility. Recognized denial formats:
 
 - macOS `sandbox-exec`: `deny(file-read-data) /path`
 - Generic Unix: `/path: Permission denied`, `/path: Operation not permitted`
@@ -450,6 +497,8 @@ Since scode is itself a sandbox, inner browser sandboxes fail (double-sandboxing
 | `PLAYWRIGHT_MCP_NO_SANDBOX=1` | Playwright MCP server |
 | `CHROMIUM_FLAGS="--no-sandbox"` | Chrome/Chromium (Linux distro wrappers) |
 
+Disabling the inner browser sandbox is a security tradeoff: a compromised renderer inherits everything the outer scode policy permits, including readable project files and any explicit allows. For hostile content, prefer `--trust untrusted` and add only the minimum paths needed; keep network disabled unless the task requires it.
+
 For Puppeteer and Playwright library usage, scode injects a Node.js preload module (via `NODE_OPTIONS`) that patches `child_process.spawn`, `spawnSync`, `exec`, `execSync`, `execFile`, and `execFileSync` to add `--no-sandbox` when launching Chromium binaries. No code changes needed.
 
 For Claude Code with Playwright, create `.mcp.json` in your project root:
@@ -459,7 +508,7 @@ For Claude Code with Playwright, create `.mcp.json` in your project root:
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--no-sandbox"]
+      "args": ["@playwright/mcp@0.0.78", "--no-sandbox"]
     }
   }
 }
@@ -467,12 +516,12 @@ For Claude Code with Playwright, create `.mcp.json` in your project root:
 
 ## Platform notes
 
-**macOS** — uses `sandbox-exec` (built-in). Allow-default profile with deny rules. `~/Library` is blocked with read-only and read-write carve-outs for essential subdirs. `sandbox-exec` is deprecated by Apple but still functional as of macOS 26. Tested on current macOS releases.
+**macOS** — uses the system `/usr/bin/sandbox-exec`. `~/Library` is blocked without automatic credential-bearing carve-outs. `sandbox-exec` is deprecated; scode checks that the system binary exists and the runtime tests probe it before relying on it.
 
 **Linux** — uses `bubblewrap` (install separately). Home dir is bound; blocked dirs are overlaid with tmpfs. Tested on Debian/Ubuntu; other distros may work but are not guaranteed.
 
 **Both platforms:**
-- **Strict mode** — deny-default, allow essentials (`/usr`, `/opt`, system dirs). Auto-allows harness config dir when a known harness is detected. On macOS, strict mode also adds `~/Library` carve-outs for known harnesses.
+- **Strict mode** — deny-default, allow essentials (`/usr`, `/opt`, system dirs). Auto-allows only read-only access to the detected harness's listed config/state paths. `--trust untrusted` disables that auto-allow.
 - **`--block` under project dir** — if the project dir sits under a blocked parent, the project-dir override re-allows the project subtree so work can proceed. `--block` entries inside the project are then re-applied, so blocking project subdirectories still works.
 
 ## Tips
@@ -529,41 +578,63 @@ scode --config ~/.config/scode/sandbox-paranoid.yaml gemini
 
 **Some harnesses already have sandboxes. Why use scode?**
 
-A few do. Claude Code has a permission system and an opt-in OS-level sandbox (Seatbelt on macOS, bubblewrap on Linux). Codex CLI uses OS-level sandboxing (Seatbelt/Landlock+seccomp), enabled by default. Gemini CLI and Qwen Code have opt-in OS-level sandboxes, disabled by default. Most others (OpenCode, Goose, Droid, etc.) have no meaningful OS-level isolation.
+Several harnesses provide their own permission or OS-sandbox features, and
+their defaults change over time. Consult each harness's current documentation.
+scode's purpose is a single outer policy that does not depend on one harness's
+approval parser or release-specific defaults.
 
 Even for the ones that do, each harness implements its own policy with its own defaults, its own gaps, and its own config format. scode gives you a single boundary across all of them — one config file, one set of rules, audited once. Switch harnesses without relearning sandbox config. Run multiple harnesses on the same project with identical protections.
 
 **Is it safe to use `--dangerously-skip-permissions` or YOLO mode with scode?**
 
-Safer, yes. Those modes let the harness run tools without asking you first — which is great for speed but risky if the harness wanders. With scode, the OS-level sandbox caps what damage is possible: the harness can freely modify files inside your project, but it still cannot read `~/.aws`, `~/Documents`, `~/.1password`, or any other blocked path. You can accept permissions more freely and worry less about fat-finger approvals. scode does not make YOLO mode "safe" in an absolute sense, but it makes the worst case a lot less bad. Note that `~/.ssh` is not blocked by default (git needs it) — add `--block ~/.ssh` if you want that protection too.
+Safer, but not safe in an absolute sense. scode blocks protected host paths including `~/.ssh`, `~/.aws`, `~/Documents`, and password stores. The harness can still modify a read-write project, execute project code, and send readable project data over an enabled network. Prefer `--trust untrusted` for unknown repositories and keep human approval for consequential actions.
 
 **When is scode NOT useful?**
 
-If you only use one harness, only for a single scoped project, and never give it tasks that touch anything outside that project directory — scode adds little value. The harness can only see what you point it at anyway.
+If you already run one harness inside a separately verified, deny-default
+container or VM with no host credentials, sockets, or broad mounts, scode adds
+little value. A native host process otherwise inherits ambient filesystem,
+environment, descriptor, and service authority beyond the path in its prompt.
 
 It starts to matter when you use multiple harnesses, when your projects sit next to sensitive files, or when you give harnesses broader tasks — cross-project work, system admin, file management — where a mistake can do real damage. It is also just nice to have a safety net that does not depend on each harness getting its own isolation right.
 
 **Does scode slow anything down?**
 
-Barely. `sandbox-exec` and `bubblewrap` add negligible overhead — your process runs at native speed. The only cost is ~10ms for scode to generate the profile and launch.
+The sandboxed process runs natively. Startup adds profile construction and one
+sandbox-engine launch; measure it on your platform if latency matters.
 
 **Can I use scode with tools that are not AI harnesses?**
 
 Yes. `scode -- npm test`, `scode -- make build`, or any other command works. You will get a warning that it is not a known harness (meaning sandbox behavior has not been specifically tested for it), but it will still run sandboxed.
 
-**Why is `~/.ssh` not blocked by default?**
+**Why did Git over SSH stop working?**
 
-SSH keys are needed for git operations over SSH, which is common during development. Blocking them by default would break `git clone`, `git push`, etc. inside the sandbox. If you want to block SSH keys, use `--block ~/.ssh` or add it to your config file.
+`~/.ssh`, `SSH_AUTH_SOCK`, and `SSH_AGENT_PID` are removed from ambient access.
+Prefer HTTPS with a narrowly scoped, short-lived credential. If SSH agent
+forwarding is necessary, opt in to both the socket path and environment value:
+
+```bash
+sock="$SSH_AUTH_SOCK"
+scode --allow "$sock" -- env SSH_AUTH_SOCK="$sock" git fetch
+```
+
+This grants the sandbox signing/authentication authority for that agent.
 
 **Why not just use Docker?**
 
 Docker solves a different problem. Full environment isolation, but you pay for it: a running daemon, image management, volume mounts, networking config. You lose access to host tools, keychains, SSH agents, GUI apps — all stuff that AI harnesses actually need. You can make it work, but it is tedious and the result does not feel native.
 
-scode does the opposite. Your harness runs normally, with full access to your tools and environment. scode just blocks the specific directories it has no business touching. One script, ~10ms startup, nothing changes about how your tools work.
+scode keeps native host tooling while applying filesystem, environment, and
+network policy. That compatibility also means explicitly allowed host services
+remain part of the sandbox's authority.
 
 **Apple deprecated `sandbox-exec`. Will scode break?**
 
-Apple has marked `sandbox-exec` as deprecated since macOS 10.x, but it still works fine as of macOS 26 (Tahoe). Apple's own App Sandbox and system services use the same kernel framework underneath (`libsandbox` / Seatbelt). "Deprecated" here means Apple is not committing to the API long-term — not that they are removing it. If they do eventually pull it, scode will need to move to something else (probably Endpoint Security framework). PRs toward that are welcome.
+`sandbox-exec` is deprecated and Apple does not promise long-term compatibility.
+The system binary is still present and scode's runtime probes pass on the tested
+macOS 26 host, but a future update can change or remove it. If the probe fails,
+scode stops instead of running unsandboxed. A replacement backend would require
+a separately designed and tested macOS security architecture.
 
 **Does scode support Windows?**
 
@@ -575,7 +646,12 @@ Not yet. scode uses `sandbox-exec` on macOS and `bubblewrap` on Linux — there 
 
 **Is scode secure against sandbox escapes?**
 
-No. scode is a best-effort defense, not a hard security boundary. The underlying mechanisms (`sandbox-exec`, `bubblewrap`) are solid, but scode does not claim to stop deliberate escape attempts or kernel-level exploits. It is meant to catch the common case: an AI harness that wanders into your personal documents or 1Password vault by mistake. Not a determined attacker. Seatbelt, not armored vehicle.
+No. scode is a best-effort policy wrapper, not a complete security boundary.
+Bubblewrap constructs namespaces and mounts from scode's policy; it does not
+define that policy itself. Apple's `sandbox-exec` interface is deprecated and
+imports a private system profile for compatibility. Neither protects against
+kernel/sandbox-engine vulnerabilities, authority carried by standard streams,
+or authority the caller explicitly allows.
 
 **Are there other tools like this?**
 
@@ -596,9 +672,10 @@ Open an issue or PR on [GitHub](https://github.com/bindsch/scode). This is beta 
 ## Running tests
 
 ```bash
-brew install bats-core shellcheck node   # or: apt install bats shellcheck nodejs npm
-npm install
+brew install bats-core shellcheck node kcov   # use Node.js 22+; install equivalents on Linux
+npm ci
 make test                                 # runs shellcheck + JS tests + bats
+make coverage                             # enforces >=80% shell and JS coverage
 ```
 
 `make test` runs `shellcheck scode`, `make test-js`, then the full `bats` suite. You can also run them separately:

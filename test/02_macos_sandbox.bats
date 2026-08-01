@@ -80,14 +80,13 @@ wait_for_file() {
   [[ "$output" == *"$HOME/.config/hub"* ]]
 }
 
-@test "dry-run: ~/.ssh is NOT blocked by default" {
+@test "dry-run: ~/.ssh is blocked by default" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]
-  # SSH should be accessible for git operations
   local blocked_section
   blocked_section=$(echo "$output" | sed -n '/Blocked directories/,/^$/p')
-  [[ "$blocked_section" != *"$HOME/.ssh"* ]]
+  [[ "$blocked_section" == *"$HOME/.ssh"* ]]
 }
 
 @test "dry-run: macOS blocks ~/Library" {
@@ -97,37 +96,34 @@ wait_for_file() {
   [[ "$output" == *"(subpath \"$HOME/Library\")"* ]]
 }
 
-@test "dry-run: macOS carves out read-write ~/Library subdirs" {
+@test "dry-run: macOS does not auto-allow broad ~/Library subdirs" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"carve-outs (read-write)"* ]]
-  [[ "$output" == *"$HOME/Library/Application Support"* ]]
-  [[ "$output" == *"$HOME/Library/Caches"* ]]
-  [[ "$output" == *"$HOME/Library/Preferences"* ]]
+  [[ "$output" != *"carve-outs (read-write)"* ]]
+  [[ "$output" != *"$HOME/Library/Application Support"* ]]
+  [[ "$output" != *"$HOME/Library/Caches"* ]]
+  [[ "$output" != *"$HOME/Library/Preferences"* ]]
 }
 
-@test "dry-run: macOS carves out read-only ~/Library/Keychains" {
+@test "dry-run: macOS does not auto-allow ~/Library/Keychains" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"carve-outs (read-only)"* ]]
-  [[ "$output" == *"$HOME/Library/Keychains"* ]]
-  # Keychains should be file-read* only, NOT file-write*
-  local keychains_section
-  keychains_section=$(echo "$output" | sed -n '/read-only/,/^$/p')
-  [[ "$keychains_section" == *"(allow file-read*"* ]]
-  [[ "$keychains_section" != *"file-write*"* ]]
+  [[ "$output" != *"carve-outs (read-only)"* ]]
+  [[ "$output" != *"$HOME/Library/Keychains"* ]]
 }
 
-@test "dry-run: --allow suppresses a Library carve-out" {
+@test "dry-run: --allow explicitly opens a Library subtree" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
-  # If user explicitly --allows ~/Library, the deny is removed entirely
-  # so carve-outs are not needed
-  run "$SCODE" --dry-run --allow "$HOME/Library" -C "$TEST_PROJECT" -- true
+  local fake_home="$TEST_PROJECT/home"
+  mkdir -p "$fake_home/Library/Caches"
+  HOME="$fake_home" run "$SCODE" --dry-run --allow "$fake_home/Library/Caches" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" != *"(subpath \"$HOME/Library\")"* ]]
-  [[ "$output" != *"carve-outs"* ]]
+  local fake_home_real
+  fake_home_real="$(realpath "$fake_home")"
+  [[ "$output" == *"(subpath \"$fake_home_real/Library\")"* ]]
+  [[ "$output" == *"(subpath \"$fake_home_real/Library/Caches\")"* ]]
 }
 
 @test "dry-run: blocks privilege escalation" {
@@ -353,12 +349,43 @@ wait_for_file() {
   [[ "$output" != *"(allow network"* ]]
 }
 
-@test "dry-run: --strict allows scode lib dir for preload" {
+@test "dry-run: --strict allows only the exact scode preload" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"scode lib directory"* ]]
-  [[ "$output" == *"Node.js preload"* ]]
+  [[ "$output" == *"scode Node.js preload"* ]]
+  [[ "$output" == *"(literal \""* ]]
+  [[ "$output" == *"no-sandbox.js"* ]]
+  [[ "$output" != *"scode lib directory"* ]]
+}
+
+@test "macOS runtime: strict project under a built-in blocked parent remains usable" {
+  require_runtime_sandbox
+  local fake_home="$TEST_PROJECT/strict-home-parent"
+  local project="$fake_home/Documents/project"
+  local empty_config="$fake_home/empty-config.yaml"
+  mkdir -p "$project"
+  : > "$empty_config"
+
+  HOME="$fake_home" SCODE_CONFIG="$empty_config" run "$SCODE" --strict -C "$project" -- /bin/pwd
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"$(realpath "$project")"* ]]
+}
+
+@test "macOS runtime: strict executes an exact user-local binary" {
+  require_runtime_sandbox
+  local fake_home="$TEST_PROJECT/strict-home-bin"
+  local project="$fake_home/project"
+  local local_bin="$fake_home/.local/bin/test-tool"
+  local empty_config="$fake_home/empty-config.yaml"
+  mkdir -p "$project" "$(dirname "$local_bin")"
+  : > "$empty_config"
+  printf '#!/bin/bash\nprintf "LOCAL_BINARY_OK\\n"\n' > "$local_bin"
+  chmod +x "$local_bin"
+
+  HOME="$fake_home" SCODE_CONFIG="$empty_config" run "$SCODE" --strict -C "$project" -- "$local_bin"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"LOCAL_BINARY_OK"* ]]
 }
 
 # ---------- Path sanitization ----------
@@ -440,7 +467,7 @@ YAML
 
 # ---------- macOS: project dir under blocked parent ----------
 
-@test "dry-run: project dir under blocked parent gets explicit allow" {
+@test "dry-run: custom block covering project fails closed" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   # Create a project inside a blocked parent
   local blocked_parent="$TEST_PROJECT/blocked-parent"
@@ -449,16 +476,11 @@ YAML
   local real_project
   real_project="$(realpath "$project")"
   run "$SCODE" --dry-run --block "$blocked_parent" -C "$project" -- true
-  [ "$status" -eq 0 ]
-  # Parent should be blocked
-  [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
-  # Project should have an explicit allow override
-  [[ "$output" == *"override blocked parent"* ]]
-  [[ "$output" == *"(allow file-read* file-write* process-exec"* ]]
-  [[ "$output" == *"${real_project}"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"custom block covers the project directory"* ]]
 }
 
-@test "dry-run: project dir under blocked parent with --ro is read-only" {
+@test "dry-run: --ro does not weaken custom block covering project" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   local blocked_parent="$TEST_PROJECT/blocked-parent-ro"
   local project="$blocked_parent/myproject"
@@ -466,13 +488,8 @@ YAML
   local real_project
   real_project="$(realpath "$project")"
   run "$SCODE" --dry-run --ro --block "$blocked_parent" -C "$project" -- true
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"override blocked parent, read-only"* ]]
-  # Should allow file-read but not file-write in the override
-  local override_section
-  override_section=$(echo "$output" | sed -n '/override blocked parent/,/)$/p')
-  [[ "$override_section" == *"(allow file-read*"* ]]
-  [[ "$override_section" != *"file-write*"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"custom block covers the project directory"* ]]
 }
 
 @test "dry-run: project dir NOT under blocked parent emits no override" {
@@ -619,7 +636,7 @@ YAML
   [[ "$output" != *"Command binary (auto-allow"* ]]
 }
 
-@test "dry-run: config --block still allows command-binary auto-allow" {
+@test "dry-run: config block prevents command-binary auto-allow" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   local blocked_dir="$TEST_PROJECT/config-blocked-bin"
   mkdir -p "$blocked_dir"
@@ -630,27 +647,26 @@ YAML
   printf 'blocked:\n  - %s\n' "$blocked_dir" > "$config_file"
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- "$fake_tool"
   [ "$status" -eq 0 ]
-  # Config block (not CLI block) should still get auto-allow
-  [[ "$output" == *"Command binary (auto-allow"* ]]
+  [[ "$output" != *"Command binary (auto-allow"* ]]
 }
 
 # ---------- Fix 10: --block subdir inside project under blocked parent ----------
 
-@test "dry-run: --block on project subdir re-denies after project override" {
+@test "dry-run: --block on project subdir remains denied" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   local blocked_parent="/tmp/scode-fix10-parent-$$"
   track_cleanup "$blocked_parent"
   local project_dir="$blocked_parent/myproject"
   local secret_dir="$project_dir/secrets"
   mkdir -p "$secret_dir"
-  run "$SCODE" --dry-run --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- true
+  run "$SCODE" --dry-run --block "$secret_dir" -C "$project_dir" -- true
   [ "$status" -eq 0 ]
   # The profile should re-deny the secrets subdir after the project allow
   [[ "$output" == *"(deny file-read* file-write* process-exec"* ]]
   [[ "$output" == *"secrets"* ]]
 }
 
-@test "runtime: --block on project subdir blocks access under blocked parent" {
+@test "runtime: --block on project subdir blocks access" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   require_runtime_sandbox
   local blocked_parent="/tmp/scode-fix10-rt-$$"
@@ -660,7 +676,8 @@ YAML
   mkdir -p "$secret_dir"
   echo "topsecret" > "$secret_dir/key.txt"
   # The command should fail to read the secret file
-  run "$SCODE" --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- cat secrets/key.txt
+  run "$SCODE" --block "$secret_dir" -C "$project_dir" -- cat secrets/key.txt
+  [ "$status" -ne 0 ]
   [[ "$output" != *"topsecret"* ]]
 }
 

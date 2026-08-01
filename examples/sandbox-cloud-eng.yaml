@@ -1,23 +1,24 @@
 # scode cloud engineering sandbox configuration
 # Copy to ~/.config/scode/sandbox.yaml
 #
-# For infrastructure/cloud engineers. Allows kubectl and Docker (needed for
-# IaC work) while keeping everything else locked down.
+# For infrastructure/cloud engineers. Reopens only Kubernetes, Docker, and
+# Helm state that the built-in policy blocks. This is still allow-default mode;
+# add `strict: true` if those paths and the project should be the only writable
+# user data.
 
 scrub_env: true
+# Ambient cloud/API tokens are removed. Prefer a narrowly scoped credential
+# source for the launched command; disable scrubbing only when required.
 
 blocked:
-  # SSH keys — use --allow ~/.ssh per-session if needed for bastion access
-  - ~/.ssh
-
-  # Terraform state can contain secrets
-  - ~/.terraform.d
-
   # Cloud sync
   - ~/Dropbox
   - ~/OneDrive
 
 allowed:
+  # These paths contain credentials and powerful local sockets. Prefer
+  # short-lived, least-privilege copies containing only the context required by
+  # this run. Allowing the full live directories grants their full authority.
   # Kubernetes config — needed for cluster management
   - ~/.kube
 

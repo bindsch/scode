@@ -55,62 +55,72 @@ stop_watch_process() {
   [ -f "$log_file" ]
 }
 
-# ---------- Log file on Linux ----------
+# ---------- Runtime log hardening ----------
 
-@test "linux dry-run: --log with fake bwrap writes log file" {
+@test "runtime: PATH cannot substitute the sandbox engine" {
+  require_any_runtime_sandbox
   local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
-  local log_file="$TEST_PROJECT/linux-log.log"
-  local real_project
-  real_project="$(realpath "$TEST_PROJECT")"
+  local log_file="$TEST_PROJECT/fixed-engine.log"
 
   mkdir -p "$fake_bin"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
+  printf '#!/bin/bash\nexit 99\n' > "$fake_bin/sandbox-exec"
+  printf '#!/bin/bash\nexit 99\n' > "$fake_bin/bwrap"
+  chmod +x "$fake_bin/sandbox-exec" "$fake_bin/bwrap"
 
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  PATH="$fake_bin:$PATH" run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
   grep -q "scode session" "$log_file"
   grep -q "command: true" "$log_file"
 }
 
-@test "linux runtime: --log creates missing parent directories" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
-  local log_file="$TEST_PROJECT/nested/linux/logs/session.log"
+@test "runtime: --log creates missing parent directories" {
+  require_any_runtime_sandbox
+  local log_file="$TEST_PROJECT/nested/runtime/logs/session.log"
 
-  mkdir -p "$fake_bin"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
-
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
+}
+
+@test "runtime: --log replaces symlinks safely and uses mode 0600" {
+  require_any_runtime_sandbox
+  local log_file="$TEST_PROJECT/session.log"
+  local target_file="$TEST_PROJECT/symlink-target"
+
+  printf 'do-not-overwrite\n' > "$target_file"
+  ln -s "$target_file" "$log_file"
+
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [ ! -L "$log_file" ]
+  [ "$(cat "$target_file")" = "do-not-overwrite" ]
+  local mode
+  mode="$(stat -c '%a' "$log_file" 2>/dev/null || stat -f '%Lp' "$log_file")"
+  [ "$mode" = "600" ]
+}
+
+@test "runtime: --log rejects an existing directory destination" {
+  require_any_runtime_sandbox
+  local log_dir="$TEST_PROJECT/directory.log"
+  mkdir -p "$log_dir"
+
+  run "$SCODE" --log "$log_dir" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"log path is a directory"* ]]
+  [ -d "$log_dir" ]
+  [ -z "$(find "$log_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]
+}
+
+@test "runtime: legacy log header escapes command control characters" {
+  require_any_runtime_sandbox
+  local log_file="$TEST_PROJECT/control-header.log"
+
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true $'arg\n# blocked: cli /attacker'
+  [ "$status" -eq 0 ]
+  run grep -q '^# blocked: cli /attacker$' "$log_file"
+  [ "$status" -eq 1 ]
+  grep -q '^# command: true arg\\n# blocked: cli /attacker$' "$log_file"
 }
 
 # ---------- --log tilde expansion ----------
@@ -139,29 +149,14 @@ EOF
   grep -q "# allowed:.*${real_allow}" "$log_file" || grep -q "\"allowed\".*${real_allow}" "$log_file"
 }
 
-@test "linux runtime: --log records allowed metadata entries" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
+@test "runtime: --log records allowed metadata entries" {
+  require_any_runtime_sandbox
   local allow_dir="$TEST_PROJECT/allowed-runtime"
   local log_file="$TEST_PROJECT/log-with-allowed.log"
 
-  mkdir -p "$fake_bin" "$allow_dir"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
+  mkdir -p "$allow_dir"
 
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" --allow "$allow_dir" -C "$TEST_PROJECT" -- true
+  run "$SCODE" --log "$log_file" --allow "$allow_dir" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
   local real_allow
@@ -181,6 +176,33 @@ EOF
   [ -f "$log_file" ]
   # The stderr output should be captured in the log file
   grep -q "scode-stderr-marker" "$log_file"
+}
+
+@test "runtime: logged command forwards TERM and returns 143" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov owns the traced process and intercepts signals"
+  require_any_runtime_sandbox
+  local log_file="$TEST_PROJECT/term-forwarding.log"
+  local command_pid=""
+
+  "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- /bin/sleep 30 &
+  command_pid=$!
+
+  local attempts=0
+  while [[ ! -f "$log_file" && "$attempts" -lt 50 ]]; do
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+
+  kill -TERM "$command_pid"
+  local command_status=0
+  if wait "$command_pid"; then
+    command_status=0
+  else
+    command_status=$?
+  fi
+
+  [ "$command_status" -eq 143 ]
+  [ -f "$log_file" ]
 }
 
 # ---------- Audit subcommand ----------
@@ -381,12 +403,15 @@ EOF
 }
 
 @test "audit categorizes platform-specific denials" {
-  # Use a Linux-only default path and force Linux platform detection.
   local log_file="$TEST_PROJECT/audit-platform.log"
   cat > "$log_file" <<EOF
+# scode session: 2026-07-15T10:00:00+0200
+# cwd: $TEST_PROJECT
+# blocked: platform $HOME/.mozilla
+#---
 $HOME/.mozilla/firefox/profiles.ini: Permission denied
 EOF
-  _SCODE_PLATFORM=linux run "$SCODE" audit "$log_file"
+  run "$SCODE" audit "$log_file"
   [ "$status" -eq 0 ]
   [[ "$output" == *"platform"* ]]
   [[ "$output" == *"$HOME/.mozilla"* ]]
@@ -419,34 +444,17 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "linux runtime: --log records config and project blocked metadata entries" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
+@test "runtime: --log records config and project blocked metadata entries" {
+  require_any_runtime_sandbox
   local config_file="$TEST_PROJECT/metadata-config.yaml"
   local log_file="$TEST_PROJECT/metadata-sources.log"
   local config_block="/tmp/scode-config-block-$$"
   local project_block="/tmp/scode-project-block-$$"
 
-  mkdir -p "$fake_bin"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
-
   printf 'blocked:\n  - %s\n' "$config_block" > "$config_file"
   printf 'blocked:\n  - %s\n' "$project_block" > "$TEST_PROJECT/.scode.yaml"
 
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" --config "$config_file" -C "$TEST_PROJECT" -- true
+  run "$SCODE" --log "$log_file" --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
   local config_block_resolved project_block_resolved
@@ -458,7 +466,7 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "strict harness log includes read-only auto-allowed metadata on macOS" {
+@test "strict harness log does not auto-allow macOS Library metadata" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   require_runtime_sandbox
   local fake_bin="$TEST_PROJECT/fake-bin"
@@ -474,8 +482,8 @@ EOF
 
   PATH="$fake_bin:$PATH" run "$SCODE" --strict --log "$log_file" -C "$TEST_PROJECT" -- claude
   [ "$status" -eq 0 ]
-  run grep "^# allowed: ${HOME}/Library/Keychains$" "$log_file"
-  [ "$status" -eq 0 ]
+  run grep "^# allowed: ${HOME}/Library/" "$log_file"
+  [ "$status" -ne 0 ]
 }
 
 @test "audit recognizes custom-blocked paths from log metadata" {
@@ -532,7 +540,7 @@ EOF
   # Default paths shown under defaults
   [[ "$output" == *"Blocked by scode defaults"* ]]
   [[ "$output" == *"/home/user/.aws"* ]]
-  [[ "$output" == *"--allow /home/user/.aws"* ]]
+  [[ "$output" == *"--allow "*"/home/user/.aws"* ]]
   # Custom paths shown under custom policy
   [[ "$output" == *"Blocked by custom policy"* ]]
   [[ "$output" == *"/opt/internal/secrets"* ]]
@@ -614,6 +622,7 @@ EOF
 # ---------- audit --watch happy-path ----------
 
 @test "audit --watch prints denials from appended lines" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov cannot trace the long-running tail pipeline reliably"
   local log_file="$TEST_PROJECT/watch-test.log"
   local out_file="$TEST_PROJECT/watch-out.txt"
   local watch_pid=""
@@ -629,7 +638,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 20 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for audit --watch to start"
+      printf 'timed out waiting for audit --watch to start\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -650,7 +660,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 40 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for denial output (got $count, want 2)"
+      printf 'timed out waiting for denial output (got %s, want 2)\n' "$count" >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -671,6 +682,7 @@ EOF
 }
 
 @test "audit -w prints denials from appended lines" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov cannot trace the long-running tail pipeline reliably"
   local log_file="$TEST_PROJECT/watch-short.log"
   local out_file="$TEST_PROJECT/watch-short-out.txt"
   local watch_pid=""
@@ -684,7 +696,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 20 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for audit -w to start"
+      printf 'timed out waiting for audit -w to start\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -699,7 +712,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 40 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for audit -w denial output"
+      printf 'timed out waiting for audit -w denial output\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -713,6 +727,7 @@ EOF
 }
 
 @test "audit --watch ignores pre-existing denials and follows new lines only" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov cannot trace the long-running tail pipeline reliably"
   local log_file="$TEST_PROJECT/watch-existing.log"
   local out_file="$TEST_PROJECT/watch-existing-out.txt"
   local watch_pid=""
@@ -727,7 +742,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 20 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for audit --watch to start"
+      printf 'timed out waiting for audit --watch to start\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -742,7 +758,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 40 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for denial output"
+      printf 'timed out waiting for denial output\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -763,6 +780,7 @@ EOF
 # ---------- audit_watch log_cwd regression ----------
 
 @test "audit --watch resolves relative paths via log cwd" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov cannot trace the long-running tail pipeline reliably"
   local log_file="$TEST_PROJECT/watch-cwd.log"
   local out_file="$TEST_PROJECT/watch-cwd-out.txt"
   local watch_pid=""
@@ -783,7 +801,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 20 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for audit --watch to start"
+      printf 'timed out waiting for audit --watch to start\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -800,7 +819,8 @@ EOF
     attempts=$((attempts + 1))
     if [[ $attempts -ge 40 ]]; then
       stop_watch_process "$watch_pid"
-      fail "timed out waiting for denial output"
+      printf 'timed out waiting for denial output\n' >&2
+      return 1
     fi
     sleep 0.1
   done
@@ -836,6 +856,29 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"1 unique denied path(s)"* ]]
   [[ "$output" == *"/path/with spaces"* ]]
+}
+
+@test "audit: shell-quotes suggested allow paths" {
+  local log_file="$TEST_PROJECT/audit-quoted-suggestion.log"
+  cat > "$log_file" <<'EOF'
+# scode session: test
+# blocked: platform /path/with spaces
+#---
+deny(file-read-data) /path/with spaces/secret.txt
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'--allow /path/with\ spaces'* ]]
+  [[ "$output" != *$'--allow /path/with spaces\n'* ]]
+}
+
+@test "audit: drops denied paths containing terminal control characters" {
+  local log_file="$TEST_PROJECT/audit-control-path.log"
+  printf 'deny(file-read-data) /tmp/unsafe\033]8;;https://example.invalid\aMARKER\n' > "$log_file"
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no denial patterns found"* ]]
+  [[ "$output" != *"MARKER"* ]]
 }
 
 @test "audit: empty line produces no output" {
@@ -961,6 +1004,21 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+@test "--log JSON header preserves exact argv boundaries" {
+  require_any_runtime_sandbox
+  command -v jq >/dev/null 2>&1 || skip "jq not installed"
+  local log_file="$TEST_PROJECT/json-argv.log"
+
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true "argument with spaces" ""
+  [ "$status" -eq 0 ]
+
+  local json_line
+  json_line="$(head -1 "$log_file")"
+  json_line="${json_line#\#json:}"
+  run jq -e '.argv == ["true", "argument with spaces", ""]' <<< "$json_line"
+  [ "$status" -eq 0 ]
+}
+
 @test "--log JSON and legacy headers agree on command" {
   require_runtime_sandbox
   require_node
@@ -995,28 +1053,11 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "linux runtime: --log produces JSON header" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
-  local log_file="$TEST_PROJECT/linux-json.log"
+@test "runtime: --log produces JSON header" {
+  require_any_runtime_sandbox
+  local log_file="$TEST_PROJECT/runtime-json.log"
 
-  mkdir -p "$fake_bin"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
-
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
+  run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   [ -f "$log_file" ]
   local first_line

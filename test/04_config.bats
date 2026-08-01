@@ -5,7 +5,7 @@ load test_helper
 
 # ---------- Config file ----------
 
-@test "config file adds blocked dirs (default path)" {
+@test "synthetic HOME cannot redirect the default config path" {
   local config_dir="$TEST_PROJECT/.config/scode"
   mkdir -p "$config_dir"
   cat > "$config_dir/sandbox.yaml" <<'YAML'
@@ -14,7 +14,7 @@ blocked:
 YAML
   HOME="$TEST_PROJECT" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/config-blocked-test"* ]]
+  [[ "$output" != *"/tmp/config-blocked-test"* ]]
 }
 
 @test "--config loads a specific config file" {
@@ -200,6 +200,71 @@ YAML
   [[ "$output" == *"scrubbed env vars"* ]]
   [[ "$output" == *"OPENAI_API_KEY"* ]]
   unset OPENAI_API_KEY
+}
+
+@test "config grok_defense: true enables strict Grok containment" {
+  local config_file="$TEST_PROJECT/grok-defense.yaml"
+  cat > "$config_file" <<'YAML'
+grok_defense: true
+YAML
+
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- grok
+  [ "$status" -eq 0 ]
+  assert_strict_mode_output "$output"
+  [[ "$output" == *"grok defense:"* ]]
+  [[ "$output" == *"$TEST_PROJECT/.git"* ]]
+  [[ "$output" == *"$TEST_PROJECT/.env"* ]]
+  [[ "$output" == *"grok_defense active"* ]]
+  [[ "$output" == *"--scrub-env active"* ]]
+}
+
+@test "config grok_defense: false leaves standard mode unchanged" {
+  local config_file="$TEST_PROJECT/grok-defense-off.yaml"
+  cat > "$config_file" <<'YAML'
+grok_defense: false
+YAML
+
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- grok
+  [ "$status" -eq 0 ]
+  assert_non_strict_mode_output "$output"
+  [[ "$output" != *"grok_defense active"* ]]
+}
+
+@test "config rejects invalid grok_defense value" {
+  local config_file="$TEST_PROJECT/grok-defense-invalid.yaml"
+  cat > "$config_file" <<'YAML'
+grok_defense: maybe
+YAML
+
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- grok
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid config: grok_defense: maybe"* ]]
+}
+
+@test "project config may enable but not disable grok defense" {
+  local user_config="$TEST_PROJECT/user-grok-defense.yaml"
+  cat > "$user_config" <<'YAML'
+grok_defense: true
+YAML
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+grok_defense: false
+YAML
+
+  run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- grok
+  [ "$status" -eq 0 ]
+  assert_strict_mode_output "$output"
+  [[ "$output" == *"ignoring permissive project config value: grok_defense: false"* ]]
+}
+
+@test "grok defense refuses HOME as the project" {
+  local config_file="$TEST_PROJECT/grok-home-defense.yaml"
+  cat > "$config_file" <<'YAML'
+grok_defense: true
+YAML
+
+  HOME="$TEST_PROJECT" run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- grok
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"grok_defense refuses a project rooted at"* ]]
 }
 
 @test "config accepts quoted scalar values" {
@@ -586,7 +651,7 @@ YAML
   [[ "$output" == *"/tmp/scode-test-project-blocked"* ]]
 }
 
-@test "project .scode.yaml allowed paths are applied" {
+@test "project .scode.yaml allowed paths are ignored unless user-authorized" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
 allowed:
@@ -594,11 +659,9 @@ allowed:
 YAML
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  # ~/Documents is default blocked; project allow should override it.
-  # In default mode, blocked dirs are emitted as deny rules. Documents
-  # should NOT appear in any deny rule.
   local docs_expanded="$HOME/Documents"
-  [[ "$output" != *"(deny"*"$docs_expanded"* ]]
+  [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
+  [[ "$output" == *"(subpath \"$docs_expanded\")"* || "$output" == *"--tmpfs $docs_expanded"* ]]
 }
 
 @test "CLI --block parent overrides project allowed child path" {
@@ -617,7 +680,10 @@ YAML
     _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --block "$blocked_parent" -C "$TEST_PROJECT" -- true
     [ "$status" -eq 0 ]
     [[ "$output" == *"$blocked_parent"* ]]
-    [[ "$output" != *"$allowed_child"* ]]
+    [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
+    local policy_output
+    policy_output="$(printf '%s\n' "$output" | sed '/ignoring project config/d')"
+    [[ "$policy_output" != *"$allowed_child"* ]]
   done
 }
 
@@ -699,7 +765,7 @@ YAML
 
 # ---------- Project config unblock warnings ----------
 
-@test "project config warns when unblocking default-protected path" {
+@test "project config ignores allowed default-protected path" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
 allowed:
@@ -707,11 +773,12 @@ allowed:
 YAML
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  [[ "$output" == *"project config (.scode.yaml) unblocks default-protected path"* ]]
+  [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
   [[ "$output" == *"Documents"* ]]
+  [[ "$output" == *"$HOME/Documents"* ]]
 }
 
-@test "project config warns when unblocking subpath of default-protected path" {
+@test "project config ignores allowed subpath of default-protected path" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
 allowed:
@@ -719,11 +786,11 @@ allowed:
 YAML
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  [[ "$output" == *"project config (.scode.yaml) unblocks default-protected path"* ]]
+  [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
   [[ "$output" == *"Documents/projects"* ]]
 }
 
-@test "project config warns when allowing HOME parent of default-protected paths" {
+@test "project config cannot allow HOME parent of default-protected paths" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
 allowed:
@@ -733,15 +800,13 @@ YAML
   for platform in darwin linux; do
     _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
     [ "$status" -eq 0 ]
-    [[ "$output" == *"project config (.scode.yaml) unblocks default-protected path"* ]]
-    local blocked_section
-    blocked_section="$(echo "$output" | sed -n '/Blocked directories/,/^$/p')"
-    [[ "$blocked_section" != *"$HOME/.aws"* ]]
-    [[ "$blocked_section" != *"$HOME/.gnupg"* ]]
+    [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
+    [[ "$output" == *"$HOME/.aws"* ]]
+    [[ "$output" == *"$HOME/.gnupg"* ]]
   done
 }
 
-@test "project config does not warn for non-default allowed path" {
+@test "project config ignores non-default allowed path" {
   mkdir -p "$TEST_PROJECT"
   cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
 allowed:
@@ -749,7 +814,21 @@ allowed:
 YAML
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  [[ "$output" != *"unblocks default-protected path"* ]]
+  [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
+}
+
+@test "project config allowed dot cannot weaken --trust untrusted read-only project" {
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+allowed:
+  - .
+YAML
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --trust untrusted --dry-run -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ignoring project config (.scode.yaml) allowed path"* ]]
+    assert_project_read_only_output "$output" "$TEST_PROJECT"
+  done
 }
 
 # ---------- Config array merging ----------
@@ -791,7 +870,7 @@ net: on
 YAML
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"enables network access"* ]]
+  [[ "$output" == *"ignoring permissive project config value: net: on"* ]]
 }
 
 @test "project config warns when disabling strict (if user config enables it)" {
@@ -806,7 +885,7 @@ strict: false
 YAML
   run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"disables strict mode"* ]]
+  [[ "$output" == *"ignoring permissive project config value: strict: false"* ]]
   rm -f "$user_config"
 }
 
@@ -822,7 +901,7 @@ scrub_env: false
 YAML
   run "$SCODE" --dry-run --config "$user_config" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"disables env scrubbing"* ]]
+  [[ "$output" == *"ignoring permissive project config value: scrub_env: false"* ]]
   rm -f "$user_config"
 }
 
@@ -840,6 +919,16 @@ YAML
   [ "$status" -eq 0 ]
   [[ "$output" != *"enables network access"* ]]
   rm -f "$user_config"
+}
+
+@test "project config fs_mode rw cannot weaken SCODE_FS_MODE ro" {
+  cat > "$TEST_PROJECT/.scode.yaml" <<'YAML'
+fs_mode: rw
+YAML
+  SCODE_FS_MODE=ro run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring permissive project config value: fs_mode: rw"* ]]
+  assert_project_read_only_output "$output" "$TEST_PROJECT"
 }
 
 # ---------- YAML parser edge cases ----------
@@ -1016,4 +1105,50 @@ YAML
     [[ "$output" == *"/tmp/crlf-item"* ]]
     assert_network_disabled_output "$output"
   done
+}
+
+@test "project config symbolic link is rejected before parsing" {
+  local nested_project="$TEST_PROJECT/symlink-project"
+  local outside_config="$TEST_PROJECT/outside-project-config.yaml"
+  mkdir -p "$nested_project"
+  printf 'strict: true\n' > "$outside_config"
+  ln -s "$outside_config" "$nested_project/.scode.yaml"
+
+  run "$SCODE" --dry-run -C "$nested_project" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing symbolic-link project config"* ]]
+}
+
+@test "project config hard link is rejected" {
+  local nested_project="$TEST_PROJECT/hardlink-project"
+  local outside_config="$TEST_PROJECT/outside-hardlink-config.yaml"
+  mkdir -p "$nested_project"
+  printf 'strict: true\n' > "$outside_config"
+  ln "$outside_config" "$nested_project/.scode.yaml"
+
+  run "$SCODE" --dry-run -C "$nested_project" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing unsafe project config"* ]]
+}
+
+@test "config files larger than one MiB are rejected" {
+  local config_file="$TEST_PROJECT/oversized-config.yaml"
+  dd if=/dev/zero of="$config_file" bs=1048577 count=1 2>/dev/null
+
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"config file exceeds 1048576 bytes"* ]]
+}
+
+@test "grok defense rejects an allow that reopens mandatory blocks" {
+  local config_file="$TEST_PROJECT/grok-defense-overlap.yaml"
+  cat > "$config_file" <<YAML
+grok_defense: true
+allowed:
+  - $TEST_PROJECT
+YAML
+
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- grok
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"grok_defense conflicts with allowed path"* ]]
 }

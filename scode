@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
 #
 # scode - Safe sandbox wrapper for AI coding harnesses
 #
@@ -9,14 +9,63 @@
 
 set -euo pipefail
 
+readonly SCODE_CALLER_PATH="${PATH:-}"
+readonly SCODE_CALLER_SSH_AUTH_SOCK="${SSH_AUTH_SOCK:-}"
+PATH="/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH
+unset BASH_ENV ENV CDPATH SSH_AUTH_SOCK SSH_AGENT_PID
+
+# HOME influences both deny rules and Linux bind mounts. Require a concrete
+# user-owned directory and independently discover the account home so a custom
+# HOME cannot hide the real home from policy.
+if [[ -z "${HOME:-}" || "$HOME" != /* || "$HOME" == "/" || ! -d "$HOME" || ! -O "$HOME" || "$HOME" =~ [[:cntrl:]] ]]; then
+  printf 'scode: unsafe HOME (expected an absolute, user-owned directory other than /)\n' >&2
+  exit 1
+fi
+HOME="$(cd -P "$HOME" && pwd -P)"
+export HOME
+
+ACCOUNT_HOME=""
+case "${OSTYPE:-}" in
+  darwin*)
+    _account_home_line="$(/usr/bin/dscl . -read "/Users/$(/usr/bin/id -un)" NFSHomeDirectory 2>/dev/null || true)"
+    ACCOUNT_HOME="${_account_home_line#NFSHomeDirectory: }"
+    ;;
+  linux*)
+    while IFS=: read -r _name _password _uid _gid _gecos _home _shell; do
+      if [[ "$_uid" == "$UID" ]]; then
+        ACCOUNT_HOME="$_home"
+        break
+      fi
+    done < /etc/passwd
+    ;;
+esac
+if [[ -z "$ACCOUNT_HOME" || "$ACCOUNT_HOME" != /* || "$ACCOUNT_HOME" == "/" || \
+      ! -d "$ACCOUNT_HOME" || ! -O "$ACCOUNT_HOME" || "$ACCOUNT_HOME" =~ [[:cntrl:]] ]]; then
+  ACCOUNT_HOME="$HOME"
+else
+  ACCOUNT_HOME="$(cd -P "$ACCOUNT_HOME" && pwd -P)"
+fi
+readonly ACCOUNT_HOME
+
 readonly PROGRAM_NAME="scode"
 readonly PROGRAM_VERSION="0.2.0"
-readonly DEFAULT_CONFIG_FILE="${HOME}/.config/scode/sandbox.yaml"
+readonly MAX_CONFIG_FILE_BYTES=1048576
+readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
+readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
 CONFIG_FILE=""
 CONFIG_FILE_EXPLICIT=0
 
+# kcov excludes these declarative policy tables because Bash's DEBUG trap does
+# not report individual multiline array entries as executed. Their behavior is
+# covered through the generated-policy and environment-scrubbing tests.
+# SCODE_COVERAGE_STATIC_START
 # Known harnesses (for shortcut detection)
-readonly KNOWN_HARNESSES=(opencode claude codex goose gemini droid qwen codemux pi)
+readonly KNOWN_HARNESSES=(
+  opencode claude codex goose gemini droid qwen codemux pi
+  aider amp crush cursor-agent copilot cn kimi
+  openhands cline kiro-cli auggie grok
+)
 
 # Default blocked directories — personal files and credentials
 DEFAULT_BLOCKED=(
@@ -25,6 +74,9 @@ DEFAULT_BLOCKED=(
   "$HOME/Desktop"
   "$HOME/Pictures"
   "$HOME/Downloads"
+  "$HOME/Music"
+  "$HOME/Movies"
+  "$HOME/Videos"
 
   # Cloud credentials
   "$HOME/.aws"
@@ -32,46 +84,81 @@ DEFAULT_BLOCKED=(
   "$HOME/.config/gcloud"
   "$HOME/.kube"
   "$HOME/.docker"
+  "$HOME/.config/containers"
+  "$HOME/.oci"
+  "$HOME/.terraform.d"
+  "$HOME/.terraformrc"
+  "$HOME/.pulumi"
+  "$HOME/.config/pulumi"
+  "$HOME/.config/doctl"
+  "$HOME/.config/helm"
+  "$HOME/.config/rclone/rclone.conf"
+  "$HOME/.config/sops/age"
+  "$HOME/.vercel"
+  "$HOME/.netlify"
+  "$HOME/.config/railway"
+  "$HOME/.fly"
+  "$HOME/.config/fly"
+  "$HOME/.config/hcloud"
 
   # Cryptographic keys
+  "$HOME/.ssh"
   "$HOME/.gnupg"
+  "$HOME/.pki"
 
   # Password managers
   "$HOME/.1password"
   "$HOME/.op"
   "$HOME/.password-store"
-
-  # Auth tokens (package registries, git, VCS tools, etc.)
-  "$HOME/.npmrc"
-  "$HOME/.netrc"
-  "$HOME/.git-credentials"
-  "$HOME/.pypirc"
-  "$HOME/.gem/credentials"
-  "$HOME/.cargo/credentials.toml"
-  "$HOME/.config/gh"
-  "$HOME/.config/hub"
-)
-
-# Linux-specific default blocks
-LINUX_EXTRA_BLOCKED=(
-  # Personal files
-  "$HOME/Videos"
-
-  # Cloud credentials
-  "$HOME/.config/doctl"
-  "$HOME/.config/helm"
-  "$HOME/.terraform.d"
-
-  # Password managers / keyrings
   "$HOME/.config/Bitwarden CLI"
   "$HOME/.config/Bitwarden"
   "$HOME/.local/share/keyrings"
   "$HOME/.local/share/kwalletd"
 
-  # Auth tokens
-  "$HOME/.config/pip"
+  # Auth tokens (package registries, git, VCS tools, etc.)
+  "$HOME/.npmrc"
+  "$HOME/.yarnrc"
+  "$HOME/.yarnrc.yml"
+  "$HOME/.bunfig.toml"
+  "$HOME/.netrc"
+  "$HOME/.git-credentials"
   "$HOME/.config/git/credentials"
+  "$HOME/.pypirc"
+  "$HOME/.config/pip"
+  "$HOME/.config/pypoetry/auth.toml"
+  "$HOME/.gem/credentials"
+  "$HOME/.cargo/credentials"
+  "$HOME/.cargo/credentials.toml"
+  "$HOME/.m2/settings.xml"
+  "$HOME/.gradle/gradle.properties"
+  "$HOME/.nuget/NuGet/NuGet.Config"
+  "$HOME/.composer/auth.json"
+  "$HOME/.config/gh"
+  "$HOME/.config/hub"
+  "$HOME/.config/glab-cli"
+  "$HOME/.huggingface"
+  "$HOME/.cache/huggingface/token"
 
+  # Shell and database histories often contain pasted secrets
+  "$HOME/.bash_history"
+  "$HOME/.zsh_history"
+  "$HOME/.python_history"
+  "$HOME/.mysql_history"
+  "$HOME/.psql_history"
+  "$HOME/.sqlite_history"
+)
+# SCODE_COVERAGE_STATIC_END
+
+# A caller may intentionally use a synthetic HOME. Keep it functional, while
+# blocking the actual account home wholesale so the override cannot relocate
+# all built-in protections.
+if [[ "$ACCOUNT_HOME" != "$HOME" ]]; then
+  DEFAULT_BLOCKED+=("$ACCOUNT_HOME")
+fi
+
+# SCODE_COVERAGE_STATIC_START
+# Linux-specific default blocks
+LINUX_EXTRA_BLOCKED=(
   # Browser profiles (saved passwords, cookies, sessions)
   "$HOME/.mozilla"
   "$HOME/.config/google-chrome"
@@ -88,39 +175,37 @@ LINUX_EXTRA_BLOCKED=(
 )
 
 # macOS-specific default blocks
-# ~/Library is blocked wholesale. Browser-needed subdirectories are carved out
-# via DARWIN_LIBRARY_ALLOWED so Chrome/Playwright can still function.
-# Use --allow ~/Library to unblock everything, or --allow specific subdirs.
+# ~/Library is blocked wholesale. There are no automatic browser or Keychain
+# carve-outs: both contain high-value cookies, OAuth tokens, and credentials.
+# Use --allow with a specific subdirectory only when a harness requires it.
 DARWIN_EXTRA_BLOCKED=(
   "$HOME/Library"
 )
 
-# Subdirectories of ~/Library re-allowed after the blanket deny.
-# Read-write: directories that browsers/tools need full access to.
-DARWIN_LIBRARY_ALLOWED_RW=(
-  "$HOME/Library/Application Support"
-  "$HOME/Library/Caches"
-  "$HOME/Library/Preferences"
-  "$HOME/Library/Saved Application State"
-)
-
-# Read-only: directories that tools need to read (e.g. Keychain for auth)
-# but should never write to from inside the sandbox.
-DARWIN_LIBRARY_ALLOWED_RO=(
-  "$HOME/Library/Keychains"
-)
+DARWIN_LIBRARY_ALLOWED_RW=()
+DARWIN_LIBRARY_ALLOWED_RO=()
 
 # Env var patterns to scrub with --scrub-env
 SCRUB_PATTERNS=(
   # Cloud providers
   "AWS_*"
   "AZURE_*"
+  "GOOGLE_*"
+  "CLOUDSDK_AUTH_*"
   "GOOGLE_APPLICATION_CREDENTIALS"
   "DO_API_KEY"
+  "DIGITALOCEAN_*"
+  "OCI_*"
+  "KUBECONFIG"
 
   # AI / ML
   "OPENAI_API_KEY"
   "ANTHROPIC_API_KEY"
+  "XAI_API_KEY"
+  "GEMINI_API_KEY"
+  "OPENROUTER_API_KEY"
+  "PERPLEXITY_API_KEY"
+  "AZURE_OPENAI_*"
   "HF_TOKEN"
   "HUGGING_FACE_HUB_TOKEN"
   "COHERE_API_KEY"
@@ -130,11 +215,17 @@ SCRUB_PATTERNS=(
   "GROQ_API_KEY"
   "FIREWORKS_API_KEY"
   "DEEPSEEK_API_KEY"
+  "CEREBRAS_API_KEY"
+  "FAL_KEY"
 
   # VCS / CI / CD
   "GITHUB_TOKEN"
   "GH_TOKEN"
   "GITLAB_*_TOKEN"
+  "CI_JOB_TOKEN"
+  "CIRCLE_TOKEN"
+  "BUILDKITE_AGENT_ACCESS_TOKEN"
+  "ACTIONS_RUNTIME_TOKEN"
   "VERCEL_TOKEN"
   "NETLIFY_AUTH_TOKEN"
 
@@ -144,9 +235,16 @@ SCRUB_PATTERNS=(
   "CLOUDFLARE_API_TOKEN"
   "SENTRY_AUTH_TOKEN"
   "SNYK_TOKEN"
+  "TF_TOKEN_*"
+  "TFC_TOKEN"
+  "DATABASE_URL"
+  "*_DATABASE_URL"
 
   # Package registries
   "NPM_TOKEN"
+  "NODE_AUTH_TOKEN"
+  "CARGO_REGISTRY_TOKEN"
+  "COMPOSER_AUTH"
 
   # Docker
   "DOCKER_PASSWORD"
@@ -155,7 +253,25 @@ SCRUB_PATTERNS=(
   # SSH
   "SSH_AUTH_SOCK"
   "SSH_AGENT_PID"
+  "SSH_ASKPASS"
+
+  # Process and language startup injection
+  "BASH_ENV"
+  "ENV"
+  "ZDOTDIR"
+  "LD_*"
+  "DYLD_*"
+  "NODE_OPTIONS"
+  "PYTHONPATH"
+  "PYTHONHOME"
+  "RUBYOPT"
+  "PERL5OPT"
+  "JAVA_TOOL_OPTIONS"
+  "_JAVA_OPTIONS"
+  "GIT_CONFIG_*"
+  "GIT_ASKPASS"
 )
+# SCODE_COVERAGE_STATIC_END
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -163,9 +279,59 @@ readonly YELLOW='\033[1;33m'
 readonly GREEN='\033[0;32m'
 readonly NC='\033[0m'
 
-# Portable realpath: use the system binary when available, otherwise fall back
-# to cd+pwd (resolves symlinks on most shells). Handles files and directories,
-# including non-existent paths (returns an absolute path).
+# Render untrusted text without allowing terminal control sequences to execute.
+# Newlines and other C0/DEL bytes are shown as escapes; ordinary UTF-8 is kept.
+terminal_escape() {
+  local s="$1"
+  local result="" i ch ord escaped
+  for (( i=0; i<${#s}; i++ )); do
+    ch="${s:i:1}"
+    printf -v ord '%d' "'$ch"
+    case "$ord" in
+      8)  result+='\b' ;;
+      9)  result+='\t' ;;
+      10) result+='\n' ;;
+      12) result+='\f' ;;
+      13) result+='\r' ;;
+      [0-9]|[1-2][0-9]|3[0-1]|127)
+        printf -v escaped '\\x%02x' "$ord"
+        result+="$escaped"
+        ;;
+      *) result+="$ch" ;;
+    esac
+  done
+  printf '%s' "$result"
+}
+
+# Collapse dot components in an absolute path without touching the filesystem.
+# This is required for the realpath fallback: retaining an unresolved `..`
+# would let policy comparisons disagree with the path the kernel resolves.
+_collapse_absolute_path() {
+  local input="$1"
+  local -a parts=() normalized=()
+  local part result=""
+  IFS='/' read -r -a parts <<< "$input"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      ""|.) continue ;;
+      ..)
+        if [[ ${normalized[0]+_} ]]; then
+          unset 'normalized[${#normalized[@]}-1]'
+          normalized=("${normalized[@]+"${normalized[@]}"}")
+        fi
+        ;;
+      *) normalized+=("$part") ;;
+    esac
+  done
+  for part in "${normalized[@]+"${normalized[@]}"}"; do
+    result="${result}/${part}"
+  done
+  printf '%s\n' "${result:-/}"
+}
+
+# Portable realpath: use the system binary when available, otherwise resolve
+# final-component symlinks with readlink and parent components with cd+pwd.
+# Handles files, directories, and non-existent paths.
 _realpath() {
   local input="$1"
   local resolved=""
@@ -181,6 +347,27 @@ _realpath() {
   if [[ "$abs" != /* ]]; then
     abs="${PWD}/${abs}"
   fi
+
+  # `cd -P "$(dirname ...)"` does not resolve a file's final symlink. Follow it
+  # explicitly, including relative link targets, and cap traversal to reject
+  # cycles consistently with realpath(1).
+  local link_count=0 link_target=""
+  while [[ -L "$abs" ]]; do
+    link_count=$((link_count + 1))
+    if [[ "$link_count" -gt 40 ]]; then
+      error "too many symbolic links while resolving path: ${input}"
+      return 1
+    fi
+    if ! link_target="$(/usr/bin/readlink "$abs")"; then
+      error "failed to read symbolic link while resolving path: ${input}"
+      return 1
+    fi
+    if [[ "$link_target" == /* ]]; then
+      abs="$link_target"
+    else
+      abs="$(dirname "$abs")/${link_target}"
+    fi
+  done
 
   if [[ -d "$abs" ]]; then
     (cd "$abs" && pwd -P)
@@ -209,9 +396,9 @@ _realpath() {
     local anchor_resolved
     anchor_resolved="$(cd "$anchor" && pwd -P)"
     if [[ "$anchor_resolved" == "/" ]]; then
-      printf '/%s\n' "${suffix#/}"
+      _collapse_absolute_path "/${suffix#/}"
     else
-      printf '%s%s\n' "$anchor_resolved" "$suffix"
+      _collapse_absolute_path "${anchor_resolved}${suffix}"
     fi
     return 0
   fi
@@ -220,15 +407,15 @@ _realpath() {
     anchor_dir="$(cd "$(dirname "$anchor")" && pwd -P)"
     anchor_base="$(basename "$anchor")"
     if [[ "$anchor_dir" == "/" ]]; then
-      printf '/%s%s\n' "$anchor_base" "$suffix"
+      _collapse_absolute_path "/${anchor_base}${suffix}"
     else
-      printf '%s/%s%s\n' "$anchor_dir" "$anchor_base" "$suffix"
+      _collapse_absolute_path "${anchor_dir}/${anchor_base}${suffix}"
     fi
     return 0
   fi
 
   # Defensive final fallback ("/" should always exist).
-  printf '%s\n' "$abs"
+  _collapse_absolute_path "$abs"
 }
 
 # Normalize paths for policy matching: trim trailing slashes except for root.
@@ -283,10 +470,21 @@ paths_overlap_hierarchy() {
 # -------- Platform detection --------
 
 detect_platform() {
-  # _SCODE_PLATFORM: internal override for testing (not a public API).
+  # _SCODE_PLATFORM is a dry-run-only test hook. Letting an inherited variable
+  # select the runtime engine would make platform enforcement environment-
+  # dependent and would invite PATH/fake-engine tests that bypass real isolation.
   if [[ -n "${_SCODE_PLATFORM:-}" ]]; then
-    PLATFORM="${_SCODE_PLATFORM}"
-    return
+    case "${_SCODE_PLATFORM}" in
+      darwin|linux)
+        if [[ "${DRY_RUN:-0}" -ne 1 ]]; then
+          error "internal platform override is only permitted with --dry-run"
+          exit 1
+        fi
+        PLATFORM="${_SCODE_PLATFORM}"
+        return
+        ;;
+      *) error "invalid internal platform override: ${_SCODE_PLATFORM}"; exit 1 ;;
+    esac
   fi
   case "$(uname -s)" in
     Darwin) PLATFORM="darwin" ;;
@@ -337,13 +535,12 @@ EOF
 
 Default Protections:
   The following paths are blocked by default:
-    ~/Documents, ~/Desktop, ~/Pictures, ~/Downloads
-    ~/.aws, ~/.azure, ~/.config/gcloud, ~/.kube, ~/.docker
-    ~/.gnupg, ~/.1password, ~/.op, ~/.password-store
+    Personal media, documents, downloads, and shell/database histories
+    ~/.ssh, ~/.gnupg, ~/.pki, cloud/container/IaC credentials
+    Password managers, browser profiles, keyrings, and package tokens
     ~/.npmrc, ~/.netrc, ~/.git-credentials, ~/.pypirc
-    ~/.gem/credentials, ~/.cargo/credentials.toml
-    ~/.config/gh, ~/.config/hub
-    ~/Library (macOS only — with browser/keychain carve-outs)
+    ~/.config/gh, ~/.config/glab-cli, ~/.huggingface
+    ~/Library (macOS only — no automatic credential carve-outs)
     Additional Linux-specific blocks (browser profiles, keyrings, etc.)
 
   Use --allow to override specific defaults:
@@ -357,12 +554,12 @@ Config File:
     fs_mode: ro          # same as --ro
     strict: true         # same as --strict
     scrub_env: true      # same as --scrub-env
+    grok_defense: true   # harden Grok collection + block repo history/secrets
 
   Example:
     strict: true
     scrub_env: true
     blocked:
-      - ~/.ssh
       - ~/.aws
       - ~/.gnupg
 
@@ -385,19 +582,18 @@ Examples:
   scode --ro claude                  # read-only sandbox
   scode --allow ~/Documents claude   # unblock ~/Documents
   scode -n claude                    # no network access
-  scode --strict claude              # deny-default; auto-allows ~/.claude + macOS Library
-  scode --trust untrusted claude     # maximum lockdown (strict + no-net + scrub + ro)
+  scode --strict claude              # deny-default; ~/.claude is read-only
+  scode --trust untrusted claude     # maximum lockdown; no harness-state auto-allow
   scode --trust trusted claude       # minimal sandbox (rw, net on)
   scode --scrub-env claude           # scrub API keys from env
   scode --log session.log claude     # log sandbox denials for review
   scode audit session.log            # parse denials, suggest --allow flags
 
 Strict Mode Auto-Allow:
-  When --strict detects a known harness in the command, it automatically allows:
-    - The harness config directory (e.g. ~/.claude for claude)
-    - macOS ~/Library browser carve-outs (Application Support, Caches, etc.)
-    - macOS ~/Library/Keychains (read-only)
+  When --strict detects a known harness, it automatically allows read-only access to:
+    - The harness config/state paths (e.g. ~/.claude for claude)
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
+  --trust untrusted disables harness-state auto-allows entirely.
 
 Trust Presets:
   --trust trusted      Minimal sandbox: rw, network on, no strict, no scrub-env.
@@ -409,8 +605,8 @@ Trust Presets:
 
 Project Config:
   .scode.yaml in the project root (--cwd directory) is loaded with lower
-  priority than the user config. Same format as ~/.config/scode/sandbox.yaml.
-  Priority: CLI flags > user config > project config > env vars > defaults.
+  priority than the user config. It may only tighten the policy; project
+  allowed paths and permissive scalar values are ignored.
 
 Audit Subcommand:
   scode audit <logfile>
@@ -433,6 +629,8 @@ Browser Support:
   preload module (via NODE_OPTIONS) that patches child_process.spawn,
   spawnSync, exec, execSync, execFile, and execFileSync to automatically
   add --no-sandbox when launching Chromium binaries.
+  A compromised renderer therefore inherits everything the outer scode policy
+  permits. Minimize explicit allows and use --trust untrusted for hostile input.
 
   Chrome/Playwright also need --no-sandbox for sandbox-exec (nested sandbox).
   For Claude Code with Playwright plugin, create .mcp.json in project root:
@@ -440,7 +638,7 @@ Browser Support:
       "mcpServers": {
         "playwright": {
           "command": "npx",
-          "args": ["@playwright/mcp@latest", "--no-sandbox"]
+          "args": ["@playwright/mcp@0.0.78", "--no-sandbox"]
         }
       }
     }
@@ -452,20 +650,24 @@ version() {
 }
 
 error() {
-  printf '%b%s%b\n' "${RED}${PROGRAM_NAME}: " "$*" "${NC}" >&2
+  printf '%b%s%b\n' "${RED}${PROGRAM_NAME}: " "$(terminal_escape "$*")" "${NC}" >&2
 }
 
 warning() {
-  printf '%b%s%b\n' "${YELLOW}${PROGRAM_NAME}: " "$*" "${NC}" >&2
+  printf '%b%s%b\n' "${YELLOW}${PROGRAM_NAME}: " "$(terminal_escape "$*")" "${NC}" >&2
 }
 
 info() {
-  printf '%b%s%b\n' "${GREEN}${PROGRAM_NAME}: " "$*" "${NC}" >&2
+  printf '%b%s%b\n' "${GREEN}${PROGRAM_NAME}: " "$(terminal_escape "$*")" "${NC}" >&2
 }
 
 # Ensure the parent directory for a log file exists.
 ensure_log_parent_dir() {
   local log_file="$1"
+  if [[ -d "$log_file" && ! -L "$log_file" ]]; then
+    error "log path is a directory: ${log_file}"
+    exit 1
+  fi
   local log_dir
   log_dir="$(dirname "${log_file}")"
   if [[ -d "${log_dir}" ]]; then
@@ -483,9 +685,15 @@ run_with_stderr_log() {
   local log_file="$1"
   shift
 
+  if ! { : >&9; } 2>/dev/null; then
+    error "log descriptor is not open: ${log_file}"
+    return 1
+  fi
+
   local tmp_dir
-  if ! tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/scode-log.XXXXXX")"; then
+  if ! tmp_dir="$(mktemp -d "/tmp/scode-log.XXXXXX")"; then
     error "failed to create temporary log directory"
+    exec 9>&-
     return 1
   fi
 
@@ -493,32 +701,71 @@ run_with_stderr_log() {
   if ! mkfifo "${stderr_pipe}"; then
     error "failed to create temporary stderr pipe"
     rmdir "${tmp_dir}" 2>/dev/null || true
+    exec 9>&-
     return 1
   fi
 
-  # Clean up FIFO on unexpected exit (SIGINT/SIGTERM).
-  # This local trap is safe: scode sets no other INT/TERM handlers,
-  # and the global EXIT trap handles its own cleanup independently.
-  trap 'rm -f "${stderr_pipe}"; rmdir "${tmp_dir}" 2>/dev/null || true' INT TERM
-
-  # Stream stderr live to terminal and append it to the log file.
-  tee -a "${log_file}" < "${stderr_pipe}" >&2 &
+  # write_log_header_json opened fd 9 on the same temporary inode before
+  # installing it at log_file. Stream through that descriptor so a sandboxed
+  # command cannot redirect logging by replacing the path.
+  tee /dev/fd/9 < "${stderr_pipe}" >&2 &
   local tee_pid=$!
 
   local rc=0
-  if "$@" 2>"${stderr_pipe}"; then
+  local signal_rc=0
+  local command_pid=""
+  "$@" 2>"${stderr_pipe}" &
+  command_pid=$!
+
+  # Bash defers traps while waiting on a foreground command. Running the
+  # sandbox engine as a child lets us forward termination promptly and reap
+  # both the engine and logger before returning the conventional signal code.
+  trap 'signal_rc=130; kill -INT "$command_pid" "$tee_pid" 2>/dev/null || true' INT
+  trap 'signal_rc=143; kill -TERM "$command_pid" "$tee_pid" 2>/dev/null || true' TERM
+  trap 'signal_rc=129; kill -HUP "$command_pid" "$tee_pid" 2>/dev/null || true' HUP
+
+  if wait "${command_pid}"; then
     rc=0
   else
     rc=$?
   fi
-
-  if ! wait "${tee_pid}"; then
-    warning "log writer failed — log file may be incomplete"
+  if [[ "$signal_rc" -ne 0 ]]; then
+    wait "${command_pid}" 2>/dev/null || true
+    rc="$signal_rc"
   fi
+
+  local tee_rc=0
+  if wait "${tee_pid}"; then
+    tee_rc=0
+  else
+    tee_rc=$?
+  fi
+  if [[ "$tee_rc" -ne 0 && "$signal_rc" -eq 0 ]]; then
+    error "log writer failed — requested log is incomplete"
+    [[ "$rc" -eq 0 ]] && rc=1
+  fi
+  exec 9>&-
   rm -f "${stderr_pipe}"
   rmdir "${tmp_dir}" 2>/dev/null || true
-  trap - INT TERM
+  trap - INT TERM HUP
   return "${rc}"
+}
+
+# sandbox-exec has no close-fds option. Start it through a fixed privileged Bash
+# that closes every inherited descriptor except standard input/output/error,
+# then replaces itself with the engine. The -c program is a trusted constant;
+# all engine/profile/command values remain positional argv entries.
+run_macos_sandbox_engine() {
+  # shellcheck disable=SC2016  # expanded by the fixed inner Bash, not this one
+  /usr/bin/env "PATH=${SCODE_CALLER_PATH}" /bin/bash -p -c '
+    for fd_path in /dev/fd/[0-9]*; do
+      fd=${fd_path##*/}
+      case "$fd" in 0|1|2) continue ;; esac
+      [[ "$fd" =~ ^[0-9]+$ ]] || continue
+      eval "exec ${fd}>&-"
+    done
+    exec "$@"
+  ' scode-fd-guard "$@"
 }
 
 # Check if arg is a known harness
@@ -701,6 +948,30 @@ _detect_harness_from_args() {
     return 0
   fi
 
+  # Shell wrappers execute the argument following a -c-style flag. Resolve
+  # that command string here so wrapper recursion (env/nice -> shell) works.
+  case "$base" in
+    sh|bash|zsh|dash|ksh)
+      local shell_i
+      for (( shell_i=1; shell_i<${#argv[@]}; shell_i++ )); do
+        local shell_tok="${argv[$shell_i]}"
+        if [[ "$shell_tok" =~ ^-[A-Za-z]*c[A-Za-z]*$ ]]; then
+          local shell_cmd_i=$((shell_i + 1))
+          if [[ "$shell_cmd_i" -lt ${#argv[@]} && "${argv[$shell_cmd_i]}" == "--" ]]; then
+            (( shell_cmd_i++ ))
+          fi
+          [[ "$shell_cmd_i" -ge ${#argv[@]} ]] && break
+          _shell_split_words "${argv[$shell_cmd_i]}"
+          if [[ ${#SHELL_SPLIT_WORDS[@]} -gt 0 ]] && \
+             _detect_harness_from_shell_words "${SHELL_SPLIT_WORDS[@]}"; then
+            return 0
+          fi
+          break
+        fi
+      done
+      ;;
+  esac
+
   # Transparent wrappers: the real command is the next positional arg.
   # Skip flags, assignments, and wrapper-specific positional args to find it.
   case "$base" in
@@ -713,19 +984,16 @@ _detect_harness_from_args() {
         if [[ "$tok" == "--" ]]; then
           (( i++ ))
           if [[ $i -lt ${#argv[@]} ]]; then
-            local inner
-            inner="$(_strip_outer_quotes "${argv[$i]}")"
-            inner="${inner##*/}"
-            is_known_harness "$inner" && { echo "$inner"; return 0; }
+            if _detect_harness_from_args "${argv[@]:$i}"; then
+              return 0
+            fi
           fi
           break
         fi
         case "$tok" in -u|--unset|-S|--split-string) (( i++ )); continue ;; esac
         [[ "$tok" == -* ]] && continue
         _is_assignment_token "$tok" && continue
-        local inner="${tok##*/}"
-        if is_known_harness "$inner"; then
-          echo "$inner"
+        if _detect_harness_from_args "${argv[@]:$i}"; then
           return 0
         fi
         break
@@ -740,11 +1008,16 @@ _detect_harness_from_args() {
         tok="$(_strip_outer_quotes "${argv[$i]}")"
         if [[ "$tok" == "--" ]]; then
           (( i++ ))
+          # timeout and taskset still require their duration/mask positional
+          # after the option delimiter.
+          if [[ $i -lt ${#argv[@]} && ( "$base" == "timeout" || "$base" == "taskset" ) ]] && \
+             _should_consume_wrapper_positional "$base" "$(_strip_outer_quotes "${argv[$i]}")"; then
+            (( i++ ))
+          fi
           if [[ $i -lt ${#argv[@]} ]]; then
-            local inner
-            inner="$(_strip_outer_quotes "${argv[$i]}")"
-            inner="${inner##*/}"
-            is_known_harness "$inner" && { echo "$inner"; return 0; }
+            if _detect_harness_from_args "${argv[@]:$i}"; then
+              return 0
+            fi
           fi
           break
         fi
@@ -761,9 +1034,7 @@ _detect_harness_from_args() {
           consumed_positional=1
           continue
         fi
-        local inner="${tok##*/}"
-        if is_known_harness "$inner"; then
-          echo "$inner"
+        if _detect_harness_from_args "${argv[@]:$i}"; then
           return 0
         fi
         break
@@ -840,30 +1111,53 @@ detect_harness() {
   return 1
 }
 
-# Map harness name to its config directory.
-get_harness_config_dir() {
+# Populate HARNESS_CONFIG_PATHS with a harness's default user config/state paths.
+get_harness_config_paths() {
+  HARNESS_CONFIG_PATHS=()
   case "$1" in
-    claude)   echo "$HOME/.claude" ;;
-    codex)    echo "$HOME/.codex" ;;
-    opencode) echo "$HOME/.config/opencode" ;;
-    goose)    echo "$HOME/.config/goose" ;;
-    gemini)   echo "$HOME/.gemini" ;;
-    droid)    echo "$HOME/.droid" ;;
-    qwen)     echo "$HOME/.config/qwen" ;;
-    codemux)  echo "$HOME/.config/codemux" ;;
-    pi)       echo "$HOME/.config/pi" ;;
-    *)        return 1 ;;
+    opencode)     HARNESS_CONFIG_PATHS=("$HOME/.config/opencode" "$HOME/.local/share/opencode") ;;
+    claude)       HARNESS_CONFIG_PATHS=("$HOME/.claude") ;;
+    codex)        HARNESS_CONFIG_PATHS=("$HOME/.codex") ;;
+    goose)        HARNESS_CONFIG_PATHS=("$HOME/.config/goose") ;;
+    gemini)       HARNESS_CONFIG_PATHS=("$HOME/.gemini") ;;
+    droid)        HARNESS_CONFIG_PATHS=("$HOME/.factory") ;;
+    qwen)         HARNESS_CONFIG_PATHS=("$HOME/.qwen") ;;
+    codemux)      HARNESS_CONFIG_PATHS=("$HOME/.codemux" "$HOME/.config/codemux") ;;
+    pi)           HARNESS_CONFIG_PATHS=("$HOME/.pi/agent") ;;
+    aider)        HARNESS_CONFIG_PATHS=("$HOME/.aider" "$HOME/.aider.conf.yml") ;;
+    amp)          HARNESS_CONFIG_PATHS=("$HOME/.config/amp" "$HOME/.amp") ;;
+    crush)        HARNESS_CONFIG_PATHS=("$HOME/.config/crush" "$HOME/.local/share/crush") ;;
+    cursor-agent) HARNESS_CONFIG_PATHS=("$HOME/.cursor") ;;
+    copilot)      HARNESS_CONFIG_PATHS=("$HOME/.copilot" "$HOME/.cache/copilot") ;;
+    cn)           HARNESS_CONFIG_PATHS=("$HOME/.continue") ;;
+    kimi)         HARNESS_CONFIG_PATHS=("$HOME/.kimi-code" "$HOME/.kimi") ;;
+    openhands)    HARNESS_CONFIG_PATHS=("$HOME/.openhands") ;;
+    cline)        HARNESS_CONFIG_PATHS=("$HOME/.cline") ;;
+    kiro-cli)     HARNESS_CONFIG_PATHS=("$HOME/.kiro") ;;
+    auggie)       HARNESS_CONFIG_PATHS=("$HOME/.augment") ;;
+    # Environment-controlled config roots are not auto-allowed: GROK_HOME=/
+    # must never turn strict mode into a full-filesystem allow. A non-default
+    # location requires an explicit --allow from the caller.
+    grok)         HARNESS_CONFIG_PATHS=("$HOME/.grok") ;;
+    *)            return 1 ;;
   esac
 }
 
-# Validate a path is safe for use in sandbox profiles.
-# Rejects paths with newlines or null bytes (malformed/injection attempts).
+_contains_control_character() {
+  local LC_ALL=C
+  [[ "$1" =~ [[:cntrl:]] ]]
+}
+
+# Validate a path is safe for use in sandbox profiles and terminal output.
+# NUL bytes cannot exist in bash variables; all other control bytes are rejected.
 validate_path() {
   local p="$1"
-  # Reject paths with newlines or carriage returns (profile injection vectors).
-  # Null bytes cannot exist in bash variables, so no check needed.
-  if [[ "$p" == *$'\n'* ]] || [[ "$p" == *$'\r'* ]]; then
-    error "invalid path (contains control characters): $p"
+  if [[ -z "$p" ]]; then
+    error "invalid path (empty)"
+    exit 1
+  fi
+  if _contains_control_character "$p"; then
+    error "invalid path (contains control characters)"
     exit 1
   fi
 }
@@ -872,6 +1166,7 @@ validate_path() {
 # SBPL strings are "double-quoted"; backslash and double-quote need escaping.
 sbpl_escape() {
   local p="$1"
+  validate_path "$p"
   p="${p//\\/\\\\}"
   p="${p//\"/\\\"}"
   printf '%s\n' "$p"
@@ -889,6 +1184,23 @@ expand_path() {
     p="${PWD}/${p}"
   fi
   _realpath "$p"
+}
+
+# Resolve an output path without following its final component. Log creation
+# must be able to replace a pre-existing symlink instead of truncating its target.
+expand_output_path() {
+  local p="$1"
+  validate_path "$p"
+  if [[ "$p" =~ ^~(/|$) ]]; then
+    p="${HOME}${p:1}"
+  fi
+  if [[ "$p" != /* ]]; then
+    p="${PWD}/${p}"
+  fi
+  local parent base
+  parent="$(_realpath "$(dirname "$p")")"
+  base="$(basename "$p")"
+  printf '%s/%s\n' "${parent%/}" "$base"
 }
 
 # Resolve sandbox access paths (--block/--allow and config blocked/allowed).
@@ -931,7 +1243,7 @@ parse_yaml_value() {
   if [[ "$raw" == \'* ]]; then
     if [[ "$raw" =~ $single_quoted_re ]]; then
       local _sqval="${BASH_REMATCH[1]}"
-      _sqval="${_sqval//\'\'/\'}"
+      _sqval="$(printf '%s' "$_sqval" | /usr/bin/sed "s/''/'/g")"
       printf '%s\n' "$_sqval"
       return 0
     fi
@@ -947,16 +1259,33 @@ parse_yaml_value() {
 # Usage: parse_config <file> <prefix>
 #   Writes scalars to <PREFIX>_NET, <PREFIX>_STRICT, etc.
 #   Appends list items to <PREFIX>_BLOCKED and <PREFIX>_ALLOWED arrays.
-# Safety: eval is used below to set dynamic variables (e.g. CFG_NET, PCFG_STRICT).
-# The prefix is always a hardcoded literal ("CFG" or "PCFG") passed by the
+# Safety: eval is used below to set dynamic variables (for example,
+# CONFIG_NET or PROJECT_STRICT). The prefix is always a hardcoded literal
+# ("CONFIG" or "PROJECT") passed by the
 # caller, and val/value are validated against fixed sets or path-sanitized.
 # No user-controlled data reaches the eval target variable name.
 parse_config() {
   local cfg_file="$1"
   local prefix="$2"
+  local cfg_fd="${3:-}"
+  local cfg_input="$cfg_file"
 
-  if [[ ! -f "${cfg_file}" ]]; then
+  if [[ -z "$cfg_fd" && ! -f "${cfg_file}" ]]; then
     return
+  fi
+  if [[ -n "$cfg_fd" ]]; then
+    cfg_input="/dev/fd/${cfg_fd}"
+  fi
+
+  local cfg_size
+  if [[ -n "$cfg_fd" ]]; then
+    cfg_size="$(stat -f '%z' "$cfg_input" 2>/dev/null || stat -Lc '%s' "$cfg_input" 2>/dev/null || true)"
+  else
+    cfg_size="$(/usr/bin/wc -c < "${cfg_file}" | tr -d '[:space:]')"
+  fi
+  if [[ ! "$cfg_size" =~ ^[0-9]+$ || "$cfg_size" -gt "$MAX_CONFIG_FILE_BYTES" ]]; then
+    error "config file exceeds ${MAX_CONFIG_FILE_BYTES} bytes: ${cfg_file}"
+    exit 1
   fi
 
   local current_section=""
@@ -1026,6 +1355,18 @@ parse_config() {
             *) error "invalid config: scrub_env: $val (expected 'true' or 'false') (${cfg_file})"; exit 1 ;;
           esac
           ;;
+        grok_defense)
+          case "$val" in
+            true|false)
+              if [[ "$val" == "true" ]]; then
+                eval "${prefix}_GROK_DEFENSE=1"
+              else
+                eval "${prefix}_GROK_DEFENSE=0"
+              fi
+              ;;
+            *) error "invalid config: grok_defense: $val (expected 'true' or 'false') (${cfg_file})"; exit 1 ;;
+          esac
+          ;;
         *)
           error "invalid config at line ${line_no}: unknown key '${key}' (${cfg_file})"
           exit 1
@@ -1075,7 +1416,7 @@ parse_config() {
 
     error "invalid config at line ${line_no}: unsupported syntax (${cfg_file})"
     exit 1
-  done < "${cfg_file}"
+  done < "${cfg_input}"
 }
 
 # Check whether a path is covered by an allow list.
@@ -1095,7 +1436,7 @@ is_allowed_in_list() {
 
 # Any allow (config or CLI)
 is_allowed() {
-  [[ ${#ALL_ALLOWED[@]} -eq 0 ]] && return 1
+  [[ ${ALL_ALLOWED[0]+_} ]] || return 1
   is_allowed_in_list "$1" "${ALL_ALLOWED[@]}"
 }
 
@@ -1103,19 +1444,6 @@ is_allowed() {
 is_cli_allowed() {
   [[ ${#RESOLVED_CLI_ALLOWED[@]} -eq 0 ]] && return 1
   is_allowed_in_list "$1" "${RESOLVED_CLI_ALLOWED[@]}"
-}
-
-# Path is under a CLI-blocked parent (or equals one).
-is_under_cli_block() {
-  local check="$1"
-  [[ ${#RESOLVED_CLI_BLOCKED[@]} -eq 0 ]] && return 1
-  local b
-  for b in "${RESOLVED_CLI_BLOCKED[@]}"; do
-    if is_same_or_descendant_path "$check" "$b"; then
-      return 0
-    fi
-  done
-  return 1
 }
 
 # Scrub sensitive env vars
@@ -1173,27 +1501,46 @@ json_escape() {
   printf '%s' "$result"
 }
 
+# Escape controls for the human-readable single-line log header without
+# otherwise changing ordinary quotes or backslashes.
+legacy_log_escape() {
+  terminal_escape "$1"
+}
+
 # Write a JSON header line to the log file, followed by the legacy comment
 # header. The JSON line is prefixed with `#json:` so it's treated as a comment
 # by the legacy parser (starts with `#`, not matching any metadata pattern).
 # External tools can read it with: head -1 log | sed 's/^#json://' | jq .
 #
 # Usage: write_log_header_json <log_file> [extra_comment_lines...]
-# Expects these globals: COMMAND[], PROJECT_DIR, ALL_BLOCKED[],
+# Expects these globals: REQUESTED_COMMAND[], PROJECT_DIR, ALL_BLOCKED[],
 # ALL_BLOCKED_SOURCES[], ALL_ALLOWED[], HARNESS_STRICT_RO[]
 write_log_header_json() {
   local log_file="$1"
   shift
-  local timestamp command_str cwd_str
+  local timestamp command_str command_legacy cwd_str log_dir tmp_log
 
   timestamp="$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  command_str="$(json_escape "${COMMAND[*]}")"
+  command_str="$(json_escape "${REQUESTED_COMMAND[*]}")"
+  command_legacy="$(legacy_log_escape "${REQUESTED_COMMAND[*]}")"
   cwd_str="$(json_escape "${PROJECT_DIR}")"
 
-  {
+  log_dir="$(dirname "${log_file}")"
+  if ! tmp_log="$(umask 077; mktemp "${log_dir}/.scode-log.XXXXXX")"; then
+    error "failed to create log file in: ${log_dir}"
+    return 1
+  fi
+
+  if ! {
     # JSON header line
-    printf '#json:{"version":1,"session":"%s","command":"%s","cwd":"%s"' \
-      "$timestamp" "$command_str" "$cwd_str"
+    printf '#json:{"version":1,"session":"%s","command":"%s","argv":[' \
+      "$timestamp" "$command_str"
+    local argv_first=1
+    for _arg in "${REQUESTED_COMMAND[@]}"; do
+      [[ "$argv_first" -eq 1 ]] && argv_first=0 || printf ','
+      printf '"%s"' "$(json_escape "$_arg")"
+    done
+    printf '],"cwd":"%s"' "$cwd_str"
 
     # blocked array
     printf ',"blocked":['
@@ -1223,7 +1570,7 @@ write_log_header_json() {
 
     # Legacy comment header (human-readable, parsed by audit_log/audit_watch)
     echo "# scode session: ${timestamp}"
-    echo "# command: ${COMMAND[*]}"
+    echo "# command: ${command_legacy}"
     echo "# cwd: ${PROJECT_DIR}"
     for _i in "${!ALL_BLOCKED[@]}"; do
       echo "# blocked: ${ALL_BLOCKED_SOURCES[$_i]} ${ALL_BLOCKED[$_i]}"
@@ -1241,7 +1588,42 @@ write_log_header_json() {
     done
 
     echo "#---"
-  } > "$log_file"
+  } > "$tmp_log"; then
+    rm -f "$tmp_log"
+    error "failed to write log header: ${log_file}"
+    return 1
+  fi
+
+  if ! chmod 600 "$tmp_log"; then
+    rm -f "$tmp_log"
+    error "failed to secure log file permissions: ${log_file}"
+    return 1
+  fi
+  # Keep an append descriptor on the exact inode that will become log_file.
+  # This removes the path lookup between header installation and stderr
+  # streaming, closing the symlink-replacement race against the child process.
+  if ! exec 9>>"$tmp_log"; then
+    rm -f "$tmp_log"
+    error "failed to open log file: ${log_file}"
+    return 1
+  fi
+  # GNU mv uses -T and BSD mv uses -h to replace a destination symlink itself
+  # instead of treating its target as the destination.
+  if mv -fT "$tmp_log" "$log_file" 2>/dev/null; then
+    :
+  elif mv -fh "$tmp_log" "$log_file" 2>/dev/null; then
+    :
+  else
+    exec 9>&-
+    rm -f "$tmp_log"
+    error "failed to install log file: ${log_file}"
+    return 1
+  fi
+  if [[ ! -f "$log_file" || -L "$log_file" ]]; then
+    exec 9>&-
+    error "log destination changed during installation: ${log_file}"
+    return 1
+  fi
 }
 
 # Extract a denied path from a single log line. Prints the path on match,
@@ -1280,18 +1662,20 @@ _normalize_denied_path() {
   path="${path#"${path%%[![:space:]]*}"}"
   path="${path%"${path##*[![:space:]]}"}"
   [[ -z "$path" ]] && return 1
+  _contains_control_character "$path" && return 1
 
   if [[ "$path" =~ ^~(/|$) ]]; then
     path="${HOME}${path:1}"
   fi
-  if [[ "$path" != /* && -n "$log_cwd" ]]; then
+  if [[ "$path" != /* ]]; then
+    [[ -n "$log_cwd" && "$log_cwd" == /* ]] || return 1
     if [[ "$path" == ./* ]]; then
       path="${path#./}"
     fi
     path="${log_cwd%/}/${path}"
   fi
-
-  printf '%s\n' "$path"
+  _contains_control_character "$path" && return 1
+  _realpath "$path"
 }
 
 # Parse denial patterns from a log file, categorize against blocked lists,
@@ -1312,7 +1696,7 @@ audit_log() {
   # Collect unique denied paths
   local denied_paths=()
   local seen_paths=()
-  local line
+  local line _cwd_candidate _aval
 
   # Parse "# blocked:" metadata from log header (if present)
   local log_blocked_cats=()
@@ -1325,14 +1709,20 @@ audit_log() {
     # Stop at first non-comment line
     [[ "$line" != \#* ]] && break
     if [[ "$line" =~ ^#\ cwd:\ (.+)$ ]]; then
-      log_cwd="${BASH_REMATCH[1]}"
+      _cwd_candidate="${BASH_REMATCH[1]}"
+      if [[ "$_cwd_candidate" == /* ]] && ! _contains_control_character "$_cwd_candidate"; then
+        log_cwd="$_cwd_candidate"
+      fi
     fi
-    if [[ "$line" =~ ^#\ blocked:\ (default|platform|config|project|cli)\ (.+)$ ]]; then
+    if [[ "$line" =~ ^#\ blocked:\ (default|platform|config|project|cli|defense)\ (.+)$ ]]; then
       local src="${BASH_REMATCH[1]}"
       local bpath="${BASH_REMATCH[2]}"
+      [[ "$bpath" == /* ]] || continue
+      _contains_control_character "$bpath" && continue
+      bpath="$(_realpath "$bpath")"
       # Map config/project/cli sources to "custom" category
       local cat="$src"
-      if [[ "$src" == "config" || "$src" == "project" || "$src" == "cli" ]]; then
+      if [[ "$src" == "config" || "$src" == "project" || "$src" == "cli" || "$src" == "defense" ]]; then
         cat="custom"
       fi
       log_blocked_cats+=("${cat}:${bpath}")
@@ -1340,7 +1730,10 @@ audit_log() {
     fi
     if [[ "$line" =~ ^#\ allowed:\ (.+)$ ]]; then
       _aval="${BASH_REMATCH[1]}"
+      [[ "$_aval" == /* ]] || continue
+      _contains_control_character "$_aval" && continue
       _aval="${_aval%/}"
+      _aval="$(_realpath "$_aval")"
       log_allowed+=("$_aval")
     fi
   done < "$log_file"
@@ -1428,9 +1821,9 @@ audit_log() {
     fi
 
     if [[ -n "$matched_custom" ]]; then
-      cat_custom+=("custom|${matched_custom}|${path}")
+      cat_custom+=("custom${AUDIT_RECORD_SEPARATOR}${matched_custom}${AUDIT_RECORD_SEPARATOR}${path}")
     elif [[ -n "$matched_default_parent" ]]; then
-      cat_default+=("${matched_default_cat}|${matched_default_parent}|${path}")
+      cat_default+=("${matched_default_cat}${AUDIT_RECORD_SEPARATOR}${matched_default_parent}${AUDIT_RECORD_SEPARATOR}${path}")
     else
       uncategorized+=("$path")
     fi
@@ -1446,10 +1839,8 @@ audit_log() {
     # Group by blocked parent (global dedup, not just adjacent)
     local seen_default_parents=()
     for entry in "${cat_default[@]}"; do
-      local cat="${entry%%|*}"
-      local rest="${entry#*|}"
-      local parent="${rest%%|*}"
-      local path="${rest#*|}"
+      local cat parent path
+      IFS="$AUDIT_RECORD_SEPARATOR" read -r cat parent path <<< "$entry"
       local parent_seen=0
       for s in "${seen_default_parents[@]+"${seen_default_parents[@]}"}"; do
         [[ "$s" == "$parent" ]] && { parent_seen=1; break; }
@@ -1463,7 +1854,7 @@ audit_log() {
     echo ""
     echo "Suggested --allow flags:"
     for dir in "${seen_default_parents[@]}"; do
-      echo "  --allow $dir"
+      printf '  --allow %q\n' "$dir"
     done
   fi
 
@@ -1472,9 +1863,8 @@ audit_log() {
     echo "Blocked by custom policy:"
     local seen_custom_parents=()
     for entry in "${cat_custom[@]}"; do
-      local rest="${entry#*|}"
-      local parent="${rest%%|*}"
-      local path="${rest#*|}"
+      local _category parent path
+      IFS="$AUDIT_RECORD_SEPARATOR" read -r _category parent path <<< "$entry"
       local parent_seen=0
       for s in "${seen_custom_parents[@]+"${seen_custom_parents[@]}"}"; do
         [[ "$s" == "$parent" ]] && { parent_seen=1; break; }
@@ -1497,7 +1887,7 @@ audit_log() {
     echo ""
     echo "Suggested --allow flags:"
     for path in "${uncategorized[@]}"; do
-      echo "  --allow $path"
+      printf '  --allow %q\n' "$path"
     done
   fi
 
@@ -1525,6 +1915,12 @@ audit_watch() {
     return 1
   fi
 
+  # Snapshot before parsing metadata so a line appended during parsing is not
+  # mistaken for pre-existing content and skipped.
+  local initial_line_count
+  initial_line_count="$(wc -l < "$log_file" | tr -d '[:space:]')"
+  [[ "$initial_line_count" =~ ^[0-9]+$ ]] || initial_line_count=0
+
   # Parse "# cwd:" metadata from log header (same as audit_log).
   local log_cwd=""
   local line
@@ -1538,13 +1934,13 @@ audit_watch() {
 
   local seen_paths=()
   local count=0
-
   info "watching $log_file for denial patterns (Ctrl-C to stop)..."
   echo ""
 
-  # Follow only newly appended lines (do not replay existing content).
-  # -F follows by name and retries if the file is rotated/replaced.
-  tail -n 0 -F "$log_file" | while IFS= read -r line; do
+  # Follow only lines appended after the snapshot above. `tail -n 0` has a
+  # race between metadata parsing and opening the file; starting at the first
+  # post-snapshot line closes that gap. -F follows rotation by name.
+  tail -n "+$((initial_line_count + 1))" -F "$log_file" | while IFS= read -r line; do
     local path=""
     path="$(_extract_denied_path "$line")"
 
@@ -1564,6 +1960,64 @@ audit_watch() {
     count=$((count + 1))
     echo "[${count}] DENIED: ${path}"
   done
+}
+
+# Seatbelt uses last-match precedence. Reassert custom blocks after broad
+# carve-outs/automatic allows, then restore only authoritative CLI/user child
+# allows. Finally cap the project at read-only when requested.
+emit_macos_final_guards() {
+  local project_dir="$1"
+  local fs_mode="$2"
+  local emitted=0 i dir source bdir under_custom esc_dir esc_project
+
+  for i in "${!ALL_BLOCKED[@]}"; do
+    source="${ALL_BLOCKED_SOURCES[$i]}"
+    case "$source" in config|project|cli|defense) ;; *) continue ;; esac
+    if [[ "$emitted" -eq 0 ]]; then
+      echo ""
+      echo "; Final custom-policy blocks"
+      emitted=1
+    fi
+    esc_dir="$(sbpl_escape "${ALL_BLOCKED[$i]}")"
+    cat <<EOF
+(deny file-read* file-write* process-exec
+  (subpath "${esc_dir}")
+)
+EOF
+  done
+
+  if [[ "$emitted" -eq 1 && ${ALL_ALLOWED[0]+_} ]]; then
+    for i in "${!ALL_ALLOWED[@]}"; do
+      source="${ALL_ALLOWED_SOURCES[$i]}"
+      case "$source" in cli|config) ;; *) continue ;; esac
+      dir="${ALL_ALLOWED[$i]}"
+      under_custom=0
+      for bdir in "${ALL_BLOCKED[@]}"; do
+        if is_descendant_path "$dir" "$bdir"; then
+          under_custom=1
+          break
+        fi
+      done
+      [[ "$under_custom" -eq 0 ]] && continue
+      esc_dir="$(sbpl_escape "$dir")"
+      cat <<EOF
+(allow file-read* file-write* process-exec
+  (subpath "${esc_dir}")
+)
+EOF
+    done
+  fi
+
+  if [[ "$fs_mode" == "ro" ]]; then
+    esc_project="$(sbpl_escape "$project_dir")"
+    cat <<EOF
+
+; Final read-only project invariant
+(deny file-write*
+  (subpath "${esc_project}")
+)
+EOF
+  fi
 }
 
 # Generate macOS sandbox profile (default mode: allow default, deny specific)
@@ -1640,10 +2094,10 @@ EOF
         [[ "$dir" == "$HOME/Library" ]] && library_blocked=1 && break
       done
     fi
-    if [[ "$library_blocked" -eq 1 ]]; then
+    if [[ "$library_blocked" -eq 1 && $(( ${#DARWIN_LIBRARY_ALLOWED_RW[@]} + ${#DARWIN_LIBRARY_ALLOWED_RO[@]} )) -gt 0 ]]; then
       echo ""
       echo "; ~/Library carve-outs (read-write)"
-      for dir in "${DARWIN_LIBRARY_ALLOWED_RW[@]}"; do
+      for dir in ${DARWIN_LIBRARY_ALLOWED_RW[@]+"${DARWIN_LIBRARY_ALLOWED_RW[@]}"}; do
         if ! is_allowed "$dir"; then
           local esc_dir
           esc_dir="$(sbpl_escape "$dir")"
@@ -1656,7 +2110,7 @@ EOF
       done
       echo ""
       echo "; ~/Library carve-outs (read-only)"
-      for dir in "${DARWIN_LIBRARY_ALLOWED_RO[@]}"; do
+      for dir in ${DARWIN_LIBRARY_ALLOWED_RO[@]+"${DARWIN_LIBRARY_ALLOWED_RO[@]}"}; do
         if ! is_allowed "$dir"; then
           local esc_dir
           esc_dir="$(sbpl_escape "$dir")"
@@ -1722,7 +2176,7 @@ EOF
   # blocked parents. In sandbox-exec, later rules override earlier ones.
   # Only emit when the allowed path is actually under a blocked ancestor
   # (otherwise it's already allowed by the default-allow policy).
-  if [[ ${#ALL_ALLOWED[@]} -gt 0 && ${#blocked[@]} -gt 0 ]]; then
+  if [[ ${ALL_ALLOWED[0]+_} && ${blocked[0]+_} ]]; then
     local emitted_header=0
     for dir in "${ALL_ALLOWED[@]}"; do
       [[ -z "$dir" ]] && continue
@@ -1750,6 +2204,8 @@ EOF
       fi
     done
   fi
+
+  emit_macos_final_guards "$project_dir" "$fs_mode"
 }
 
 # Generate macOS sandbox profile (strict mode: deny default, allow specific)
@@ -1777,14 +2233,13 @@ generate_strict_profile() {
   (subpath "/opt")
   (subpath "/System")
   (subpath "/Library")
-  (subpath "/private/var")
-  (subpath "/private/tmp")
+  (subpath "/private/var/db")
+  (subpath "/private/var/run")
+  (subpath "/private/var/select")
   (subpath "/private/etc")
   (subpath "/dev")
   (subpath "/bin")
   (subpath "/sbin")
-  (subpath "/tmp")
-  (subpath "/var")
   (subpath "/etc")
 )
 
@@ -1795,18 +2250,28 @@ generate_strict_profile() {
 ; Privilege escalation prevention
 (deny process-exec (regex #"(/|^)(sudo|su|login|doas|pkexec)$"))
 
-; Allow sysctl, mach, signal
+; Runtime compatibility services. system.sb and the blanket Mach lookup remain
+; a documented limitation of Apple's deprecated sandbox-exec interface.
 (allow sysctl-read)
 (allow mach-lookup)
-(allow signal)
 
-; Temp directories
-(allow file-read* file-write*
+; Shared temp storage is denied; a private per-invocation directory is allowed
+; below after this parent rule.
+(deny file-read* file-write*
   (subpath "/tmp")
   (subpath "/private/tmp")
-  (subpath "/var/folders")
 )
 EOF
+
+  if [[ -n "${SAFE_DARWIN_TMPDIR:-}" ]]; then
+    local esc_tmpdir
+    esc_tmpdir="$(sbpl_escape "$SAFE_DARWIN_TMPDIR")"
+    cat <<EOF
+(allow file-read* file-write*
+  (subpath "${esc_tmpdir}")
+)
+EOF
+  fi
 
   # Project directory
   local esc_project
@@ -1838,15 +2303,16 @@ EOF
 EOF
   fi
 
-  # Allow read access to scode's own lib directory (for Node.js preload)
-  if [[ -n "${SCODE_LIB_DIR:-}" && -d "${SCODE_LIB_DIR}" ]]; then
-    local esc_lib
-    esc_lib="$(sbpl_escape "$SCODE_LIB_DIR")"
+  # Allow only the exact preload file; exposing the containing directory would
+  # reopen sibling files hidden by a custom block.
+  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -f "${SCODE_NO_SANDBOX_JS}" ]]; then
+    local esc_preload
+    esc_preload="$(sbpl_escape "$SCODE_NO_SANDBOX_JS")"
     cat <<EOF
 
-; scode lib directory (read-only, for Node.js preload)
+; scode Node.js preload (read-only)
 (allow file-read*
-  (subpath "${esc_lib}")
+  (literal "${esc_preload}")
 )
 EOF
   fi
@@ -1856,8 +2322,12 @@ EOF
   # --allow children of a blocked parent work correctly.
   if [[ ${#blocked[@]} -gt 0 ]]; then
     local emitted_header=0
-    for dir in "${blocked[@]}"; do
+    local i source
+    for i in "${!blocked[@]}"; do
+      dir="${blocked[$i]}"
       [[ -z "$dir" ]] && continue
+      source="${ALL_BLOCKED_SOURCES[$i]:-default}"
+      case "$source" in config|project|cli|defense) ;; *) continue ;; esac
       if [[ "$emitted_header" -eq 0 ]]; then
         echo ""
         echo "; Blocked directories"
@@ -1874,7 +2344,7 @@ EOF
   fi
 
   # Allowed directories (explicit overrides — emitted after blocked so they win)
-  if [[ ${#ALL_ALLOWED[@]} -gt 0 ]]; then
+  if [[ ${ALL_ALLOWED[0]+_} ]]; then
     echo ""
     echo "; Explicitly allowed directories"
     for dir in "${ALL_ALLOWED[@]}"; do
@@ -1890,8 +2360,8 @@ EOF
     done
   fi
 
-  # Harness strict read-only directories (e.g. ~/Library/Keychains)
-  if [[ ${#HARNESS_STRICT_RO[@]} -gt 0 ]]; then
+  # Reserved for narrowly scoped harness read-only directories.
+  if [[ ${HARNESS_STRICT_RO[0]+_} ]]; then
     echo ""
     echo "; Harness auto-allowed directories (read-only)"
     for dir in "${HARNESS_STRICT_RO[@]}"; do
@@ -1905,6 +2375,80 @@ EOF
 EOF
       fi
     done
+  fi
+
+  emit_macos_final_guards "$project_dir" "$fs_mode"
+}
+
+# Append one fail-closed bubblewrap mask. Directories use an empty tmpfs;
+# existing non-directories (regular files, sockets, FIFOs, devices, and links)
+# use an inert file bind so sandbox startup does not fail on the node type.
+append_bwrap_block() {
+  local path="$1"
+  if [[ -d "$path" && ! -L "$path" ]]; then
+    BWRAP_ARGS+=(--tmpfs "$path")
+  elif [[ -e "$path" || -L "$path" ]]; then
+    BWRAP_ARGS+=(--ro-bind /dev/null "$path")
+  elif [[ -d "$(dirname "$path")" ]]; then
+    BWRAP_ARGS+=(--tmpfs "$path")
+  fi
+}
+
+append_bwrap_allow() {
+  local path="$1"
+  local project_dir="$2"
+  local fs_mode="$3"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  if [[ "$fs_mode" == "ro" ]] && is_same_or_descendant_path "$path" "$project_dir"; then
+    BWRAP_ARGS+=(--ro-bind "$path" "$path")
+  else
+    BWRAP_ARGS+=(--bind "$path" "$path")
+  fi
+}
+
+# Reassert authoritative custom blocks after project/internal mounts, then add
+# only explicit child exceptions. A final project bind preserves --ro even when
+# an allowed ancestor was mounted read-write.
+append_bwrap_final_policy() {
+  local project_dir="$1"
+  local fs_mode="$2"
+  local strict_mode="$3"
+  local i source path bdir under_bound
+
+  for i in "${!ALL_BLOCKED[@]}"; do
+    source="${ALL_BLOCKED_SOURCES[$i]}"
+    case "$source" in config|project|cli|defense) ;; *) continue ;; esac
+    path="${ALL_BLOCKED[$i]}"
+    if [[ "$strict_mode" -eq 1 ]]; then
+      under_bound=0
+      is_same_or_descendant_path "$path" "$project_dir" && under_bound=1
+      if [[ "$under_bound" -eq 0 && ${ALL_ALLOWED[0]+_} ]]; then
+        for bdir in "${ALL_ALLOWED[@]}"; do
+          if is_same_or_descendant_path "$path" "$bdir"; then
+            under_bound=1
+            break
+          fi
+        done
+      fi
+      [[ "$under_bound" -eq 0 ]] && continue
+    fi
+    append_bwrap_block "$path"
+  done
+
+  if [[ ${ALL_ALLOWED[0]+_} && ${ALL_BLOCKED[0]+_} ]]; then
+    for path in "${ALL_ALLOWED[@]}"; do
+      [[ -z "$path" ]] && continue
+      for bdir in "${ALL_BLOCKED[@]}"; do
+        if is_descendant_path "$path" "$bdir"; then
+          append_bwrap_allow "$path" "$project_dir" "$fs_mode"
+          break
+        fi
+      done
+    done
+  fi
+
+  if [[ "$fs_mode" == "ro" ]]; then
+    BWRAP_ARGS+=(--ro-bind "$project_dir" "$project_dir")
   fi
 }
 
@@ -1923,7 +2467,7 @@ build_bwrap_args() {
   BWRAP_ARGS=()
 
   # Security flags
-  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
+  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid --close-fds)
 
   # System essentials (read-only)
   for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
@@ -1937,8 +2481,17 @@ build_bwrap_args() {
 
   # Temp dirs
   BWRAP_ARGS+=(--tmpfs /tmp)
-  if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
-    BWRAP_ARGS+=(--bind "$XDG_RUNTIME_DIR" "$XDG_RUNTIME_DIR")
+  if [[ "$net_mode" == "on" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+    local runtime_dir runtime_owner runtime_mode
+    runtime_dir="$(_realpath "$XDG_RUNTIME_DIR")"
+    runtime_owner="$(stat -c '%u' "$runtime_dir" 2>/dev/null || stat -f '%u' "$runtime_dir" 2>/dev/null || true)"
+    runtime_mode="$(stat -c '%a' "$runtime_dir" 2>/dev/null || stat -f '%Lp' "$runtime_dir" 2>/dev/null || true)"
+    if [[ "$runtime_dir" == "/run/user/${UID}" && -d "$runtime_dir" && \
+          "$runtime_owner" == "$UID" && "$runtime_mode" == "700" ]]; then
+      BWRAP_ARGS+=(--bind "$runtime_dir" "$runtime_dir")
+    else
+      warning "ignoring unsafe XDG_RUNTIME_DIR (expected /run/user/${UID}, user-owned and mode 0700)"
+    fi
   fi
 
   # Home directory (read-write) — mirrors macOS default-allow model
@@ -1955,27 +2508,8 @@ build_bwrap_args() {
   # Non-existent paths get tmpfs pre-block (prevents creation inside sandbox).
   for dir in "${blocked[@]}"; do
     [[ -z "$dir" ]] && continue
-    if [[ -d "$dir" ]]; then
-      BWRAP_ARGS+=(--tmpfs "$dir")
-    elif [[ -f "$dir" ]]; then
-      BWRAP_ARGS+=(--ro-bind /dev/null "$dir")
-    elif [[ -d "$(dirname "$dir")" ]]; then
-      BWRAP_ARGS+=(--tmpfs "$dir")
-    fi
+    append_bwrap_block "$dir"
   done
-
-  # Re-allow child paths under blocked parents (same override principle).
-  if [[ ${#ALL_ALLOWED[@]} -gt 0 && ${#blocked[@]} -gt 0 ]]; then
-    for dir in "${ALL_ALLOWED[@]}"; do
-      [[ -z "$dir" ]] && continue
-      for bdir in "${blocked[@]}"; do
-        if [[ "$dir" == "$bdir"/* ]]; then
-          [[ -e "$dir" ]] && BWRAP_ARGS+=(--bind "$dir" "$dir")
-          break
-        fi
-      done
-    done
-  fi
 
   # Project directory (override in case it falls under a blocked path).
   # bwrap mounts in order; this bind comes after blocked tmpfs overlays,
@@ -1990,22 +2524,17 @@ build_bwrap_args() {
   # Re-block subdirectories/files within the project (overlays after project bind)
   for bdir in "${blocked[@]}"; do
     if [[ "$bdir" == "$project_dir"/* ]]; then
-      if [[ -f "$bdir" ]]; then
-        BWRAP_ARGS+=(--ro-bind /dev/null "$bdir")
-      else
-        BWRAP_ARGS+=(--tmpfs "$bdir")
-      fi
+      append_bwrap_block "$bdir"
     fi
   done
 
-  # scode lib directory (read-only, for Node.js preload)
-  if [[ -n "${SCODE_LIB_DIR:-}" && -d "${SCODE_LIB_DIR}" ]]; then
-    BWRAP_ARGS+=(--ro-bind "$SCODE_LIB_DIR" "$SCODE_LIB_DIR")
-  fi
-  # If NODE_OPTIONS points at a /tmp symlink, bind that exact path too.
+  # Bind only the exact preload file. Final custom-policy masks are applied
+  # afterward, so an explicit block can never be reopened internally.
   if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -e "${SCODE_NO_SANDBOX_JS}" ]]; then
     BWRAP_ARGS+=(--ro-bind "$SCODE_NO_SANDBOX_JS" "$SCODE_NO_SANDBOX_JS")
   fi
+
+  append_bwrap_final_policy "$project_dir" "$fs_mode" 0
 
   # Network
   if [[ "$net_mode" != "on" ]]; then
@@ -2031,7 +2560,7 @@ build_strict_bwrap_args() {
   BWRAP_ARGS=()
 
   # Security flags
-  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
+  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid --close-fds)
 
   # System essentials only (read-only)
   for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
@@ -2062,26 +2591,22 @@ build_strict_bwrap_args() {
     BWRAP_ARGS+=(--bind "$project_dir" "$project_dir")
   fi
 
-  # scode lib directory (read-only, for Node.js preload)
-  if [[ -n "${SCODE_LIB_DIR:-}" && -d "${SCODE_LIB_DIR}" ]]; then
-    BWRAP_ARGS+=(--ro-bind "$SCODE_LIB_DIR" "$SCODE_LIB_DIR")
-  fi
-  # If NODE_OPTIONS points at a /tmp symlink, bind that exact path too.
+  # Bind only the exact preload file.
   if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -e "${SCODE_NO_SANDBOX_JS}" ]]; then
     BWRAP_ARGS+=(--ro-bind "$SCODE_NO_SANDBOX_JS" "$SCODE_NO_SANDBOX_JS")
   fi
 
   # Allowed dirs/files (explicit overrides)
-  if [[ ${#ALL_ALLOWED[@]} -gt 0 ]]; then
+  if [[ ${ALL_ALLOWED[0]+_} ]]; then
     for dir in "${ALL_ALLOWED[@]}"; do
       if [[ -n "$dir" && -e "$dir" ]]; then
-        BWRAP_ARGS+=(--bind "$dir" "$dir")
+        append_bwrap_allow "$dir" "$project_dir" "$fs_mode"
       fi
     done
   fi
 
   # Harness strict read-only directories
-  if [[ ${#HARNESS_STRICT_RO[@]} -gt 0 ]]; then
+  if [[ ${HARNESS_STRICT_RO[0]+_} ]]; then
     for dir in "${HARNESS_STRICT_RO[@]}"; do
       if [[ -n "$dir" && -e "$dir" ]]; then
         BWRAP_ARGS+=(--ro-bind "$dir" "$dir")
@@ -2089,32 +2614,7 @@ build_strict_bwrap_args() {
     done
   fi
 
-  # Blocked dirs — only overlay paths under a bound mount (project dir or allowed).
-  # In strict mode HOME is not bound, so blocking ~/foo is a no-op unless it falls
-  # under an explicitly allowed parent.
-  if [[ ${#blocked[@]} -gt 0 ]]; then
-    for dir in "${blocked[@]}"; do
-      [[ -z "$dir" ]] && continue
-      local under_bound=0
-      [[ "$dir" == "$project_dir" || "$dir" == "$project_dir"/* ]] && under_bound=1
-      if [[ "$under_bound" -eq 0 && ${#ALL_ALLOWED[@]} -gt 0 ]]; then
-        for adir in "${ALL_ALLOWED[@]}"; do
-          if [[ "$dir" == "$adir"/* || "$dir" == "$adir" ]]; then
-            under_bound=1
-            break
-          fi
-        done
-      fi
-      [[ "$under_bound" -eq 0 ]] && continue
-      if [[ -d "$dir" ]]; then
-        BWRAP_ARGS+=(--tmpfs "$dir")
-      elif [[ -f "$dir" ]]; then
-        BWRAP_ARGS+=(--ro-bind /dev/null "$dir")
-      elif [[ -d "$(dirname "$dir")" ]]; then
-        BWRAP_ARGS+=(--tmpfs "$dir")
-      fi
-    done
-  fi
+  append_bwrap_final_policy "$project_dir" "$fs_mode" 1
 
   # Network
   if [[ "$net_mode" != "on" ]]; then
@@ -2130,6 +2630,15 @@ build_strict_bwrap_args() {
 NET_MODE="${SCODE_NET:-on}"
 FS_MODE="${SCODE_FS_MODE:-rw}"
 
+# Internal paths must never be inherited from the caller. In particular, the
+# EXIT cleanup handler must only remove files created by this invocation.
+SCODE_LIB_DIR=""
+SCODE_NO_SANDBOX_JS=""
+SCODE_NO_SANDBOX_LINK=""
+SCODE_NO_SANDBOX_TMPDIR=""
+SAFE_DARWIN_TMPDIR=""
+SCODE_DARWIN_TMPDIR=""
+
 # Validate env-sourced values early
 case "$NET_MODE" in
   on|off) ;;
@@ -2143,6 +2652,7 @@ esac
 DRY_RUN=0
 STRICT=0
 SCRUB_ENV=0
+GROK_DEFENSE=0
 LOG_FILE=""
 PROJECT_DIR=""
 
@@ -2158,6 +2668,7 @@ CONFIG_NET=""
 CONFIG_FS_MODE=""
 CONFIG_STRICT=""
 CONFIG_SCRUB_ENV=""
+CONFIG_GROK_DEFENSE=""
 
 # Track CLI-explicit flags (so config doesn't override them)
 CLI_NET=0
@@ -2297,7 +2808,7 @@ while [[ $# -gt 0 ]]; do
         error "--log specified more than once"
         exit 1
       fi
-      LOG_FILE="$(expand_path "$2")"
+      LOG_FILE="$(expand_output_path "$2")"
       CLI_LOG_SEEN=1
       shift 2
       ;;
@@ -2346,6 +2857,8 @@ done
 if [[ ${#COMMAND[@]} -eq 0 ]]; then
   COMMAND=("opencode")
 fi
+validate_path "${COMMAND[0]}"
+REQUESTED_COMMAND=("${COMMAND[@]}")
 
 # Default project dir
 if [[ -z "${PROJECT_DIR}" ]]; then
@@ -2361,19 +2874,84 @@ fi
 
 PROJECT_DIR="$(_realpath "${PROJECT_DIR}")"
 
+# Resolve command paths from the requested working directory. Relative command
+# paths and relative PATH entries otherwise resolve against the caller's PWD,
+# even though execution happens from PROJECT_DIR.
+COMMAND_BINARY_PATH=""
+_command_lookup=""
+if [[ "${COMMAND[0]}" == */* ]]; then
+  if [[ "${COMMAND[0]}" == /* ]]; then
+    _command_lookup="${COMMAND[0]}"
+  else
+    _command_lookup="${PROJECT_DIR}/${COMMAND[0]}"
+  fi
+else
+  _command_lookup="$(cd "${PROJECT_DIR}" && PATH="$SCODE_CALLER_PATH" type -P -- "${COMMAND[0]}" 2>/dev/null || true)"
+  case "$_command_lookup" in
+    /*) ;;
+    ./*|../*|*/*) _command_lookup="${PROJECT_DIR}/${_command_lookup}" ;;
+    *) _command_lookup="" ;;
+  esac
+fi
+if [[ -n "$_command_lookup" && -e "$_command_lookup" ]]; then
+  validate_path "$_command_lookup"
+  COMMAND_BINARY_PATH="$(_realpath "$_command_lookup")"
+  validate_path "$COMMAND_BINARY_PATH"
+  # Execute the same canonical object that passed validation. A second PATH
+  # lookup after policy construction would reintroduce a TOCTOU substitution.
+  # Dry-run keeps the requested spelling so its rendered command stays useful.
+  if [[ "$DRY_RUN" -eq 0 || "${COMMAND[0]}" == */* ]]; then
+    COMMAND[0]="$COMMAND_BINARY_PATH"
+  fi
+fi
+
 # -------- Platform detection & validation --------
 
 detect_platform
 
+# macOS allocates a private per-user temporary directory below /var/folders.
+# Strict mode may write only to that canonical, owner-only directory—not the
+# entire shared /var/folders tree. An attacker-controlled TMPDIR outside that
+# namespace is ignored.
+if [[ "$PLATFORM" == "darwin" ]]; then
+  _tmp_root="/private/tmp"
+  if [[ -n "${TMPDIR:-}" && ! "$TMPDIR" =~ [[:cntrl:]] ]]; then
+    _tmp_candidate="$(_realpath "$TMPDIR")"
+    _tmp_owner="$(stat -f '%u' "$_tmp_candidate" 2>/dev/null || true)"
+    _tmp_mode="$(stat -f '%Lp' "$_tmp_candidate" 2>/dev/null || true)"
+    if [[ "$_tmp_candidate" == /private/var/folders/*/T && -d "$_tmp_candidate" && \
+          "$_tmp_owner" == "$UID" && "$_tmp_mode" == "700" ]]; then
+      _tmp_root="$_tmp_candidate"
+    fi
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    SAFE_DARWIN_TMPDIR="${_tmp_root%/}/scode.${UID}.dry-run"
+  elif SCODE_DARWIN_TMPDIR="$(mktemp -d "${_tmp_root%/}/scode.${UID}.XXXXXX")"; then
+    chmod 700 "$SCODE_DARWIN_TMPDIR"
+    SAFE_DARWIN_TMPDIR="$SCODE_DARWIN_TMPDIR"
+    TMPDIR="${SCODE_DARWIN_TMPDIR}/"
+    export TMPDIR
+  else
+    error "failed to create a private macOS temporary directory"
+    exit 1
+  fi
+fi
+
+SANDBOX_ENGINE=""
+case "$PLATFORM" in
+  darwin) SANDBOX_ENGINE="/usr/bin/sandbox-exec" ;;
+  linux) SANDBOX_ENGINE="/usr/bin/bwrap" ;;
+esac
+
 # Validate sandbox engine exists (skip for dry-run since we won't exec)
 if [[ "${DRY_RUN}" -eq 0 ]]; then
   if [[ "$PLATFORM" == "darwin" ]]; then
-    if ! command -v sandbox-exec >/dev/null 2>&1; then
+    if [[ ! -x "$SANDBOX_ENGINE" ]]; then
       error "sandbox-exec not found (are you on macOS?)"
       exit 1
     fi
   elif [[ "$PLATFORM" == "linux" ]]; then
-    if ! command -v bwrap >/dev/null 2>&1; then
+    if [[ ! -x "$SANDBOX_ENGINE" ]]; then
       error "bwrap not found. Install bubblewrap:"
       error "  Debian/Ubuntu: apt install bubblewrap"
       error "  Fedora/RHEL:   dnf install bubblewrap"
@@ -2383,7 +2961,12 @@ if [[ "${DRY_RUN}" -eq 0 ]]; then
 fi
 
 if [[ "${DRY_RUN}" -eq 0 ]]; then
-  if ! command -v "${COMMAND[0]}" >/dev/null 2>&1; then
+  if [[ "${COMMAND[0]}" == */* ]]; then
+    if [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
+      error "command not found or not executable: ${COMMAND[0]}"
+      exit 1
+    fi
+  elif [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
     error "command not found: ${COMMAND[0]}"
     exit 1
   fi
@@ -2419,46 +3002,90 @@ fi
 parse_config "${CONFIG_FILE}" "CONFIG"
 
 # Load per-project config (lower priority than user config)
-PROJECT_CONFIG_FILE="${PROJECT_DIR}/.scode.yaml"
+PROJECT_CONFIG_FILE="${PROJECT_DIR%/}/.scode.yaml"
 PROJECT_BLOCKED=()
 PROJECT_ALLOWED=()
 PROJECT_NET=""
 PROJECT_FS_MODE=""
 PROJECT_STRICT=""
 PROJECT_SCRUB_ENV=""
+PROJECT_GROK_DEFENSE=""
+if [[ -L "${PROJECT_CONFIG_FILE}" ]]; then
+  error "refusing symbolic-link project config: ${PROJECT_CONFIG_FILE}"
+  exit 1
+fi
 if [[ -f "${PROJECT_CONFIG_FILE}" ]]; then
-  parse_config "${PROJECT_CONFIG_FILE}" "PROJECT"
+  # Pin the repository-controlled config to one verified descriptor so a
+  # concurrent rename/symlink swap cannot redirect host-side reads.
+  if ! exec 8<"${PROJECT_CONFIG_FILE}"; then
+    error "failed to open project config: ${PROJECT_CONFIG_FILE}"
+    exit 1
+  fi
+  _project_cfg_path_identity="$(stat -f '%i' "$PROJECT_CONFIG_FILE" 2>/dev/null || stat -Lc '%i' "$PROJECT_CONFIG_FILE" 2>/dev/null || true)"
+  _project_cfg_fd_identity="$(stat -f '%i' /dev/fd/8 2>/dev/null || stat -Lc '%i' /dev/fd/8 2>/dev/null || true)"
+  _project_cfg_owner_links="$(stat -f '%u:%l' /dev/fd/8 2>/dev/null || stat -Lc '%u:%h' /dev/fd/8 2>/dev/null || true)"
+  _project_cfg_canonical="$(_realpath "$PROJECT_CONFIG_FILE")"
+  if [[ -z "$_project_cfg_path_identity" || "$_project_cfg_path_identity" != "$_project_cfg_fd_identity" || \
+        "$_project_cfg_owner_links" != "${UID}:1" || \
+        "$_project_cfg_canonical" != "$PROJECT_CONFIG_FILE" ]]; then
+    exec 8<&-
+    error "refusing unsafe project config (must be an owned, single-link regular file in the project root): ${PROJECT_CONFIG_FILE}"
+    exit 1
+  fi
+  parse_config "${PROJECT_CONFIG_FILE}" "PROJECT" 8
+  exec 8<&-
 fi
 
-# Apply config scalars where CLI didn't override.
-# Priority: CLI > user config > project config > env vars > defaults.
+# Apply config scalars where CLI didn't override. Project configuration is
+# untrusted and may only make the inherited/default posture more restrictive.
 if [[ "$CLI_NET" -eq 0 ]]; then
   if [[ -n "$CONFIG_NET" ]]; then
     NET_MODE="$CONFIG_NET"
-  elif [[ -n "$PROJECT_NET" ]]; then
-    NET_MODE="$PROJECT_NET"
+  elif [[ "$PROJECT_NET" == "off" ]]; then
+    NET_MODE="off"
   fi
 fi
 if [[ "$CLI_FS_MODE" -eq 0 ]]; then
   if [[ -n "$CONFIG_FS_MODE" ]]; then
     FS_MODE="$CONFIG_FS_MODE"
-  elif [[ -n "$PROJECT_FS_MODE" ]]; then
-    FS_MODE="$PROJECT_FS_MODE"
+  elif [[ "$PROJECT_FS_MODE" == "ro" ]]; then
+    FS_MODE="ro"
   fi
 fi
 if [[ "$CLI_STRICT" -eq 0 ]]; then
   if [[ -n "$CONFIG_STRICT" ]]; then
     STRICT="$CONFIG_STRICT"
-  elif [[ -n "$PROJECT_STRICT" ]]; then
-    STRICT="$PROJECT_STRICT"
+  elif [[ "$PROJECT_STRICT" == "1" ]]; then
+    STRICT=1
   fi
 fi
 if [[ "$CLI_SCRUB_ENV" -eq 0 ]]; then
   if [[ -n "$CONFIG_SCRUB_ENV" ]]; then
     SCRUB_ENV="$CONFIG_SCRUB_ENV"
-  elif [[ -n "$PROJECT_SCRUB_ENV" ]]; then
-    SCRUB_ENV="$PROJECT_SCRUB_ENV"
+  elif [[ "$PROJECT_SCRUB_ENV" == "1" ]]; then
+    SCRUB_ENV=1
   fi
+fi
+if [[ -n "$CONFIG_GROK_DEFENSE" ]]; then
+  GROK_DEFENSE="$CONFIG_GROK_DEFENSE"
+elif [[ "$PROJECT_GROK_DEFENSE" == "1" ]]; then
+  GROK_DEFENSE=1
+fi
+
+# Grok's July 2026 collector uploaded complete Git bundles, including history,
+# independently of which files the model read. This mode keeps inference usable
+# but makes the proved bulk-history channel unavailable at the OS boundary.
+if [[ "$GROK_DEFENSE" -eq 1 && "$DETECTED_HARNESS" == "grok" ]]; then
+  _account_home_real="$(_realpath "$ACCOUNT_HOME")"
+  _effective_home_real="$(_realpath "$HOME")"
+  if [[ "$PROJECT_DIR" == "/" || "$PROJECT_DIR" == "$_account_home_real" || "$PROJECT_DIR" == "$_effective_home_real" ]]; then
+    error "grok_defense refuses a project rooted at ${PROJECT_DIR}"
+    error "choose a dedicated repository directory; the project itself is readable by Grok"
+    exit 1
+  fi
+  STRICT=1
+  SCRUB_ENV=1
+  info "grok defense: strict mode, environment scrubbing, Git-history and dotenv blocks enabled"
 fi
 
 # Resolve CLI/config blocked+allowed paths relative to project dir.
@@ -2479,6 +3106,24 @@ RESOLVED_CONFIG_BLOCKED=()
 for dir in ${CONFIG_BLOCKED[@]+"${CONFIG_BLOCKED[@]}"}; do
   RESOLVED_CONFIG_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
 done
+GROK_MANDATORY_BLOCKED=()
+if [[ "$GROK_DEFENSE" -eq 1 && "$DETECTED_HARNESS" == "grok" ]]; then
+  GROK_MANDATORY_BLOCKED=(
+    "$PROJECT_DIR/.git"
+    "$PROJECT_DIR/.grok"
+    "$PROJECT_DIR/.env"
+    "$PROJECT_DIR/.envrc"
+    "$PROJECT_DIR/.env.local"
+    "$PROJECT_DIR/.env.development"
+    "$PROJECT_DIR/.env.development.local"
+    "$PROJECT_DIR/.env.production"
+    "$PROJECT_DIR/.env.production.local"
+    "$PROJECT_DIR/.env.staging"
+    "$PROJECT_DIR/.env.staging.local"
+    "$PROJECT_DIR/.env.test"
+    "$PROJECT_DIR/.env.test.local"
+  )
+fi
 RESOLVED_PROJECT_ALLOWED=()
 for dir in ${PROJECT_ALLOWED[@]+"${PROJECT_ALLOWED[@]}"}; do
   RESOLVED_PROJECT_ALLOWED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
@@ -2488,62 +3133,59 @@ for dir in ${PROJECT_BLOCKED[@]+"${PROJECT_BLOCKED[@]}"}; do
   RESOLVED_PROJECT_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
 done
 
-# Warn when project config unblocks default-protected paths.
-# A malicious .scode.yaml could add allowed: entries to expose credentials.
-_check_project_config_unblocks() {
+# Project allow rules are never authoritative. An allow already covered by a
+# CLI/user allow is harmless and redundant; every other project allow is ignored.
+_report_ignored_project_allows() {
   [[ ${#RESOLVED_PROJECT_ALLOWED[@]} -eq 0 ]] && return
-  local defaults=("${DEFAULT_BLOCKED[@]}")
-  if [[ "$PLATFORM" == "darwin" ]]; then
-    defaults+=("${DARWIN_EXTRA_BLOCKED[@]}")
-  elif [[ "$PLATFORM" == "linux" ]]; then
-    defaults+=("${LINUX_EXTRA_BLOCKED[@]}")
-  fi
-  defaults+=(${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"})
-  local pdir bdir
+  local pdir
   for pdir in "${RESOLVED_PROJECT_ALLOWED[@]}"; do
-    for bdir in "${defaults[@]}"; do
-      if paths_overlap_hierarchy "$pdir" "$bdir"; then
-        warning "project config (.scode.yaml) unblocks default-protected path: ${pdir}"
-        break
-      fi
-    done
+    if is_allowed_in_list "$pdir" \
+         "${RESOLVED_CLI_ALLOWED[@]+"${RESOLVED_CLI_ALLOWED[@]}"}" \
+         "${RESOLVED_CONFIG_ALLOWED[@]+"${RESOLVED_CONFIG_ALLOWED[@]}"}"; then
+      continue
+    fi
+    warning "ignoring project config (.scode.yaml) allowed path (project config is restrictive-only): ${pdir}"
   done
 }
-_check_project_config_unblocks
+_report_ignored_project_allows
 
 # Warn when project config sets permissive scalar values that weaken
 # user config or defaults (e.g. net: on, strict: false, scrub_env: false).
 _check_project_config_weakens() {
   [[ ! -f "${PROJECT_CONFIG_FILE}" ]] && return
-  # Warn if project config enables network when user config or defaults disable it
+  # Permissive project values are ignored unless a user config already chose them.
   if [[ "$PROJECT_NET" == "on" && "${CONFIG_NET:-}" != "on" ]]; then
-    warning "project config (.scode.yaml) enables network access (net: on)"
+    warning "ignoring permissive project config value: net: on"
   fi
-  # Warn if project config disables strict when user config enables it
-  if [[ "$PROJECT_STRICT" == "0" && "${CONFIG_STRICT:-}" == "1" ]]; then
-    warning "project config (.scode.yaml) disables strict mode (strict: false)"
+  if [[ "$PROJECT_FS_MODE" == "rw" && "${CONFIG_FS_MODE:-}" != "rw" ]]; then
+    warning "ignoring permissive project config value: fs_mode: rw"
   fi
-  # Warn if project config disables scrub-env when user config enables it
-  if [[ "$PROJECT_SCRUB_ENV" == "0" && "${CONFIG_SCRUB_ENV:-}" == "1" ]]; then
-    warning "project config (.scode.yaml) disables env scrubbing (scrub_env: false)"
+  if [[ "$PROJECT_STRICT" == "0" && "${CONFIG_STRICT:-}" != "0" ]]; then
+    warning "ignoring permissive project config value: strict: false"
+  fi
+  if [[ "$PROJECT_SCRUB_ENV" == "0" && "${CONFIG_SCRUB_ENV:-}" != "0" ]]; then
+    warning "ignoring permissive project config value: scrub_env: false"
+  fi
+  if [[ "$PROJECT_GROK_DEFENSE" == "0" && "${CONFIG_GROK_DEFENSE:-}" != "0" ]]; then
+    warning "ignoring permissive project config value: grok_defense: false"
   fi
 }
 _check_project_config_weakens
 
-# Build allowed list (CLI + user config + project config)
+# Build authoritative allowed list (CLI + user config only).
 ALL_ALLOWED=()
+ALL_ALLOWED_SOURCES=()
 for dir in ${RESOLVED_CLI_ALLOWED[@]+"${RESOLVED_CLI_ALLOWED[@]}"}; do
   ALL_ALLOWED+=("$dir")
+  ALL_ALLOWED_SOURCES+=("cli")
 done
 for dir in ${RESOLVED_CONFIG_ALLOWED[@]+"${RESOLVED_CONFIG_ALLOWED[@]}"}; do
   ALL_ALLOWED+=("$dir")
-done
-for dir in ${RESOLVED_PROJECT_ALLOWED[@]+"${RESOLVED_PROJECT_ALLOWED[@]}"}; do
-  ALL_ALLOWED+=("$dir")
+  ALL_ALLOWED_SOURCES+=("config")
 done
 
 # In strict mode, missing --allow paths are easy to overlook. Warn clearly.
-if [[ "${STRICT}" -eq 1 && ${#ALL_ALLOWED[@]} -gt 0 ]]; then
+if [[ "${STRICT}" -eq 1 && ${ALL_ALLOWED[0]+_} ]]; then
   for dir in "${ALL_ALLOWED[@]}"; do
     [[ -z "${dir}" ]] && continue
     if [[ ! -e "${dir}" ]]; then
@@ -2552,36 +3194,46 @@ if [[ "${STRICT}" -eq 1 && ${#ALL_ALLOWED[@]} -gt 0 ]]; then
   done
 fi
 
-# Harness-aware strict profiles: auto-detect the harness and add its config
-# dir + platform essentials to ALL_ALLOWED so --strict works out of the box.
+# Harness-aware strict profiles: auto-detect the harness and expose its default
+# config/state paths read-only so --strict remains usable without letting a
+# compromised tool alter credentials. The untrusted preset disables even these
+# convenience openings; callers must opt in path by path.
 HARNESS_STRICT_RO=()
-if [[ "${STRICT}" -eq 1 ]]; then
+if [[ "${STRICT}" -eq 1 && "$CLI_TRUST" != "untrusted" ]]; then
   _detected_harness="${DETECTED_HARNESS:-}"
   if [[ -n "${_detected_harness}" ]]; then
-    _harness_config_dir=""
     _auto_allowed=()
-    if _harness_config_dir="$(get_harness_config_dir "$_detected_harness")"; then
-      # Skip if explicitly blocked by CLI, user config, or project config
-      if ! is_allowed_in_list "$_harness_config_dir" \
-           "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
-           "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
-           "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
-        ALL_ALLOWED+=("$_harness_config_dir")
-        _auto_allowed+=("$_harness_config_dir")
-      fi
+    if get_harness_config_paths "$_detected_harness"; then
+      for _harness_config_path in "${HARNESS_CONFIG_PATHS[@]}"; do
+        _harness_config_path="$(_realpath "$_harness_config_path")"
+        if ! is_same_or_descendant_path "$_harness_config_path" "$HOME"; then
+          warning "strict+${_detected_harness}: ignoring config path that resolves outside HOME: ${_harness_config_path}"
+          continue
+        fi
+        # Skip if explicitly blocked by CLI, user config, or project config
+        if ! is_allowed_in_list "$_harness_config_path" \
+             "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
+             "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
+             "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
+          HARNESS_STRICT_RO+=("$_harness_config_path")
+          _auto_allowed+=("$_harness_config_path")
+        fi
+      done
     fi
-    # On macOS, add Library carve-outs for browser/tool support
+    # Reserved for narrowly scoped platform-specific auto-allows. The current
+    # macOS policy deliberately leaves these lists empty.
     if [[ "$PLATFORM" == "darwin" ]]; then
-      for dir in "${DARWIN_LIBRARY_ALLOWED_RW[@]}"; do
+      for dir in ${DARWIN_LIBRARY_ALLOWED_RW[@]+"${DARWIN_LIBRARY_ALLOWED_RW[@]}"}; do
         if ! is_allowed_in_list "$dir" \
              "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
              "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
              "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
           ALL_ALLOWED+=("$dir")
+          ALL_ALLOWED_SOURCES+=("auto")
           _auto_allowed+=("$dir")
         fi
       done
-      for dir in "${DARWIN_LIBRARY_ALLOWED_RO[@]}"; do
+      for dir in ${DARWIN_LIBRARY_ALLOWED_RO[@]+"${DARWIN_LIBRARY_ALLOWED_RO[@]}"}; do
         if ! is_allowed_in_list "$dir" \
              "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
              "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
@@ -2597,21 +3249,61 @@ if [[ "${STRICT}" -eq 1 ]]; then
   fi
 fi
 
-# CLI --block must win over config/project allows, except explicit CLI --allow.
-if [[ ${#ALL_ALLOWED[@]} -gt 0 && ${#RESOLVED_CLI_BLOCKED[@]} -gt 0 ]]; then
+# CLI --block must win over broader config/automatic allows, except explicit
+# CLI --allow. Check both hierarchy directions because an allowed parent would
+# otherwise reopen a blocked child.
+if [[ ${ALL_ALLOWED[0]+_} && ${RESOLVED_CLI_BLOCKED[0]+_} ]]; then
   _filtered_allowed=()
-  for dir in "${ALL_ALLOWED[@]}"; do
+  _filtered_allowed_sources=()
+  for _allowed_i in "${!ALL_ALLOWED[@]}"; do
+    dir="${ALL_ALLOWED[$_allowed_i]}"
     [[ -z "$dir" ]] && continue
     if is_cli_allowed "$dir"; then
       _filtered_allowed+=("$dir")
+      _filtered_allowed_sources+=("${ALL_ALLOWED_SOURCES[$_allowed_i]}")
       continue
     fi
-    if is_under_cli_block "$dir"; then
-      continue
-    fi
+    _overlaps_cli_block=0
+    for _cli_block in "${RESOLVED_CLI_BLOCKED[@]}"; do
+      if paths_overlap_hierarchy "$dir" "$_cli_block"; then
+        _overlaps_cli_block=1
+        break
+      fi
+    done
+    [[ "$_overlaps_cli_block" -eq 1 ]] && continue
     _filtered_allowed+=("$dir")
+    _filtered_allowed_sources+=("${ALL_ALLOWED_SOURCES[$_allowed_i]}")
   done
-  ALL_ALLOWED=("${_filtered_allowed[@]}")
+  ALL_ALLOWED=()
+  ALL_ALLOWED_SOURCES=()
+  if [[ ${_filtered_allowed[0]+_} ]]; then
+    ALL_ALLOWED=("${_filtered_allowed[@]}")
+    ALL_ALLOWED_SOURCES=("${_filtered_allowed_sources[@]}")
+  fi
+fi
+
+# A caller must opt in to agent forwarding twice: expose the socket path with
+# --allow and set SSH_AUTH_SOCK explicitly on the sandboxed command. Merely
+# inheriting an outer shell's agent must never grant signing authority.
+if [[ -n "$SCODE_CALLER_SSH_AUTH_SOCK" && "$SCODE_CALLER_SSH_AUTH_SOCK" == /* ]] && \
+   ! _contains_control_character "$SCODE_CALLER_SSH_AUTH_SOCK" && \
+   [[ -S "$SCODE_CALLER_SSH_AUTH_SOCK" ]]; then
+  _ssh_socket_real="$(_realpath "$SCODE_CALLER_SSH_AUTH_SOCK")"
+  DEFAULT_BLOCKED+=("$_ssh_socket_real")
+fi
+
+# Grok defense is an invariant, not an ordinary config preference. Refuse any
+# allow that would reopen a mandatory repository-history or dotenv block.
+if [[ ${GROK_MANDATORY_BLOCKED[0]+_} && ${ALL_ALLOWED[0]+_} ]]; then
+  for _defense_block in "${GROK_MANDATORY_BLOCKED[@]}"; do
+    for _allowed_dir in "${ALL_ALLOWED[@]}"; do
+      if paths_overlap_hierarchy "$_defense_block" "$_allowed_dir"; then
+        error "grok_defense conflicts with allowed path: ${_allowed_dir}"
+        error "remove the overlapping allow or disable grok_defense explicitly"
+        exit 1
+      fi
+    done
+  done
 fi
 
 # Build blocked list: defaults + platform extras + config + CLI, minus allowed
@@ -2670,9 +3362,84 @@ for dir in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}; do
   fi
 done
 
+# Mandatory defense paths are appended after normal allow filtering.
+for dir in ${GROK_MANDATORY_BLOCKED[@]+"${GROK_MANDATORY_BLOCKED[@]}"}; do
+  ALL_BLOCKED+=("$dir")
+  ALL_BLOCKED_SOURCES+=("defense")
+done
+
+# The project bind is an implicit allow needed to execute the requested task.
+# An authoritative block covering it cannot be implemented without silently
+# weakening either the block or the cwd contract, so fail closed.
+for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+  case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
+    config|project|cli|defense) ;;
+    *) continue ;;
+  esac
+  if is_same_or_descendant_path "$PROJECT_DIR" "${ALL_BLOCKED[$_blocked_i]}"; then
+    error "custom block covers the project directory: ${ALL_BLOCKED[$_blocked_i]}"
+    error "remove the block or add an authoritative allow for the project"
+    exit 1
+  fi
+done
+
+# bubblewrap needs the blocked path's parent to exist as a mount-point parent.
+# A deep missing path was previously skipped, even when it came from an
+# explicit user or project policy. Fail closed for authoritative custom rules;
+# omit unavailable built-ins with one honest warning instead of logging a deny
+# that the kernel never enforces.
+if [[ "$PLATFORM" == "linux" ]]; then
+  _enforceable_blocked=()
+  _enforceable_blocked_sources=()
+  _unavailable_default_blocks=0
+  for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+    dir="${ALL_BLOCKED[$_blocked_i]}"
+    _block_source="${ALL_BLOCKED_SOURCES[$_blocked_i]}"
+    _needs_mount=1
+    if [[ "$STRICT" -eq 1 && "$_block_source" != "config" && \
+          "$_block_source" != "project" && "$_block_source" != "cli" ]]; then
+      _needs_mount=0
+      if is_same_or_descendant_path "$dir" "$PROJECT_DIR"; then
+        _needs_mount=1
+      elif [[ ${ALL_ALLOWED[0]+_} ]]; then
+        for _allowed_dir in "${ALL_ALLOWED[@]}"; do
+          if is_same_or_descendant_path "$dir" "$_allowed_dir"; then
+            _needs_mount=1
+            break
+          fi
+        done
+      fi
+    fi
+    if [[ "$_needs_mount" -eq 1 && ! -e "$dir" && ! -d "$(dirname "$dir")" ]]; then
+      case "$_block_source" in
+        config|project|cli)
+          error "cannot enforce Linux block because its parent does not exist: ${dir}"
+          error "block an existing ancestor or create the parent directory first"
+          exit 1
+          ;;
+        *)
+          _unavailable_default_blocks=$((_unavailable_default_blocks + 1))
+          continue
+          ;;
+      esac
+    fi
+    _enforceable_blocked+=("$dir")
+    _enforceable_blocked_sources+=("$_block_source")
+  done
+  ALL_BLOCKED=()
+  ALL_BLOCKED_SOURCES=()
+  if [[ ${_enforceable_blocked[0]+_} ]]; then
+    ALL_BLOCKED=("${_enforceable_blocked[@]}")
+    ALL_BLOCKED_SOURCES=("${_enforceable_blocked_sources[@]}")
+  fi
+  if [[ "$_unavailable_default_blocks" -gt 0 ]]; then
+    warning "${_unavailable_default_blocks} built-in Linux block(s) are currently inapplicable because their parents do not exist"
+  fi
+fi
+
 # Linux default mode: --allow under a blocked parent requires an existing path
 # for bwrap re-bind. Warn when an override cannot be applied yet.
-if [[ "$PLATFORM" == "linux" && "${STRICT}" -eq 0 && ${#ALL_ALLOWED[@]} -gt 0 && ${#ALL_BLOCKED[@]} -gt 0 ]]; then
+if [[ "$PLATFORM" == "linux" && "${STRICT}" -eq 0 && ${ALL_ALLOWED[0]+_} && ${ALL_BLOCKED[0]+_} ]]; then
   for dir in "${ALL_ALLOWED[@]}"; do
     [[ -z "$dir" || -e "$dir" ]] && continue
     _allow_check="$dir"
@@ -2694,6 +3461,47 @@ fi
 if [[ "${SCRUB_ENV}" -eq 1 ]]; then
   scrub_env
 fi
+if [[ "$PLATFORM" == "linux" && "$NET_MODE" != "on" ]]; then
+  unset XDG_RUNTIME_DIR
+fi
+
+# Grok defense is exported for the entire process tree so a nested Grok launch
+# cannot inherit permissive collection defaults. The telemetry and workspace
+# collection variables are defense-in-depth for Grok's currently undocumented
+# switches; .git/dotenv denial above is the kernel-enforced boundary.
+if [[ "$GROK_DEFENSE" -eq 1 ]]; then
+  export GROK_TELEMETRY_ENABLED=false
+  export GROK_TELEMETRY_TRACE_UPLOAD=false
+  export GROK_TELEMETRY_MIXPANEL_ENABLED=false
+  export GROK_WORKSPACE_DATA_COLLECTION_DISABLED=true
+  export GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED=false
+  export GROK_RELAY_SYNC_ENABLED=false
+  export GROK_RESPECT_GITIGNORE=1
+  export GROK_DISABLE_AUTOUPDATER=1
+  export GROK_WEB_FETCH=0
+  export GROK_MEMORY=0
+  export GROK_SUBAGENTS=0
+  export GROK_TOOL_SEARCH=0
+
+  export GROK_CURSOR_SKILLS_ENABLED=false
+  export GROK_CURSOR_RULES_ENABLED=false
+  export GROK_CURSOR_AGENTS_ENABLED=false
+  export GROK_CURSOR_MCPS_ENABLED=false
+  export GROK_CURSOR_HOOKS_ENABLED=false
+  export GROK_CURSOR_SESSIONS_ENABLED=false
+  export GROK_CLAUDE_SKILLS_ENABLED=false
+  export GROK_CLAUDE_RULES_ENABLED=false
+  export GROK_CLAUDE_AGENTS_ENABLED=false
+  export GROK_CLAUDE_MCPS_ENABLED=false
+  export GROK_CLAUDE_HOOKS_ENABLED=false
+  export GROK_CLAUDE_SESSIONS_ENABLED=false
+  export GROK_CODEX_SKILLS_ENABLED=false
+  export GROK_CODEX_RULES_ENABLED=false
+  export GROK_CODEX_AGENTS_ENABLED=false
+  export GROK_CODEX_MCPS_ENABLED=false
+  export GROK_CODEX_HOOKS_ENABLED=false
+  export GROK_CODEX_SESSIONS_ENABLED=false
+fi
 
 # -------- Browser double-sandbox prevention --------
 # Since scode IS a sandbox, inner browser sandboxes will fail.
@@ -2702,7 +3510,7 @@ fi
 export SCODE_SANDBOXED=1
 export ELECTRON_DISABLE_SANDBOX=1
 export PLAYWRIGHT_MCP_NO_SANDBOX=1
-if [[ "${CHROMIUM_FLAGS:-}" != *"--no-sandbox"* ]]; then
+if [[ " ${CHROMIUM_FLAGS:-} " != *" --no-sandbox "* ]]; then
   export CHROMIUM_FLAGS="${CHROMIUM_FLAGS:+${CHROMIUM_FLAGS} }--no-sandbox"
 fi
 
@@ -2718,19 +3526,44 @@ elif [[ -f "${SCODE_DIR}/../lib/scode/no-sandbox.js" ]]; then
 fi
 if [[ -n "${SCODE_LIB_DIR}" && -f "${SCODE_LIB_DIR}/no-sandbox.js" ]]; then
   SCODE_NO_SANDBOX_JS="${SCODE_LIB_DIR}/no-sandbox.js"
+  validate_path "$SCODE_NO_SANDBOX_JS"
+  _preload_custom_block=0
+  for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+    case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
+      config|project|cli|defense)
+        if is_same_or_descendant_path "$SCODE_NO_SANDBOX_JS" "${ALL_BLOCKED[$_blocked_i]}"; then
+          _preload_custom_block=1
+          break
+        fi
+        ;;
+    esac
+  done
+  if [[ "$_preload_custom_block" -eq 1 ]]; then
+    warning "browser preload disabled because custom policy blocks it: ${SCODE_NO_SANDBOX_JS}"
+    SCODE_NO_SANDBOX_JS=""
+  fi
+  if [[ -n "$SCODE_NO_SANDBOX_JS" ]]; then
   # NODE_OPTIONS splits on whitespace — spaces in the path break --require.
   # Work around by symlinking to a space-free path when needed.
   if [[ "${SCODE_NO_SANDBOX_JS}" == *" "* ]]; then
-    # Use /tmp explicitly (not TMPDIR) so the link path itself stays space-free.
-    SCODE_NO_SANDBOX_LINK="/tmp/scode-no-sandbox-${UID}-$$.js"
-    if ln -sf "${SCODE_NO_SANDBOX_JS}" "${SCODE_NO_SANDBOX_LINK}"; then
+    # Use /tmp explicitly (not TMPDIR) so the path itself stays space-free.
+    # The private unpredictable directory prevents link-name races.
+    if SCODE_NO_SANDBOX_TMPDIR="$(mktemp -d "/tmp/scode-no-sandbox.${UID}.XXXXXX")"; then
+      chmod 700 "${SCODE_NO_SANDBOX_TMPDIR}"
+      SCODE_NO_SANDBOX_LINK="${SCODE_NO_SANDBOX_TMPDIR}/preload.js"
+    fi
+    if [[ -n "${SCODE_NO_SANDBOX_LINK}" ]] && ln -s "${SCODE_NO_SANDBOX_JS}" "${SCODE_NO_SANDBOX_LINK}"; then
       SCODE_NO_SANDBOX_JS="${SCODE_NO_SANDBOX_LINK}"
     else
-      warning "failed to create no-sandbox symlink at ${SCODE_NO_SANDBOX_LINK}"
+      warning "failed to create a space-free no-sandbox preload path"
+      [[ -n "${SCODE_NO_SANDBOX_TMPDIR}" ]] && rmdir "${SCODE_NO_SANDBOX_TMPDIR}" 2>/dev/null || true
+      SCODE_NO_SANDBOX_LINK=""
+      SCODE_NO_SANDBOX_TMPDIR=""
     fi
   fi
   export SCODE_NO_SANDBOX_JS
-  export NODE_OPTIONS="${NODE_OPTIONS:+${NODE_OPTIONS} }--require=${SCODE_NO_SANDBOX_JS}"
+  export NODE_OPTIONS="--require=${SCODE_NO_SANDBOX_JS}${NODE_OPTIONS:+ ${NODE_OPTIONS}}"
+  fi
 fi
 
 # Print sandbox-related env vars (for --dry-run)
@@ -2747,6 +3580,17 @@ print_dry_run_env() {
   if [[ "${SCRUB_ENV}" -eq 1 ]]; then
     echo "#   --scrub-env active"
   fi
+  if [[ "$GROK_DEFENSE" -eq 1 ]]; then
+    echo "#   grok_defense active"
+    echo "#   GROK_TELEMETRY_ENABLED=false"
+    echo "#   GROK_TELEMETRY_TRACE_UPLOAD=false"
+    echo "#   GROK_WORKSPACE_DATA_COLLECTION_DISABLED=true"
+    echo "#   GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED=false"
+    echo "#   GROK_RELAY_SYNC_ENABLED=false"
+    echo "#   GROK_RESPECT_GITIGNORE=1"
+    echo "#   GROK_DISABLE_AUTOUPDATER=1"
+    echo "#   Grok compatibility scanners, memory, subagents, tool search, and web fetch disabled"
+  fi
 }
 
 # -------- Generate and run --------
@@ -2755,6 +3599,12 @@ print_dry_run_env() {
 cleanup_no_sandbox_link() {
   if [[ -n "${SCODE_NO_SANDBOX_LINK:-}" ]]; then
     rm -f "${SCODE_NO_SANDBOX_LINK}"
+  fi
+  if [[ -n "${SCODE_NO_SANDBOX_TMPDIR:-}" ]]; then
+    rmdir "${SCODE_NO_SANDBOX_TMPDIR}" 2>/dev/null || true
+  fi
+  if [[ -n "${SCODE_DARWIN_TMPDIR:-}" ]]; then
+    rm -rf -- "${SCODE_DARWIN_TMPDIR}" 2>/dev/null || true
   fi
   return 0
 }
@@ -2766,35 +3616,46 @@ trap 'cleanup_no_sandbox_link' EXIT
 _scode_rc=0
 
 # -------- Command binary auto-allow --------
-# If the command binary lives under a blocked directory (e.g. pnpm globals
-# under ~/Library), auto-allow reading it so the sandbox can execute it.
-COMMAND_BINARY_PATH=""
-if _cmd_path="$(command -v "${COMMAND[0]}" 2>/dev/null)"; then
-  # command -v may return shell builtins/functions (e.g. "true"), which are not
-  # filesystem paths and cannot be realpath'ed.
-  case "$_cmd_path" in
-    /*) ;;
-    ./*|../*) _cmd_path="${PWD}/${_cmd_path}" ;;
-    *) _cmd_path="" ;;
-  esac
-  if [[ -n "$_cmd_path" && -e "$_cmd_path" ]]; then
-    COMMAND_BINARY_PATH="$(_realpath "$_cmd_path")"
-  fi
+# Only built-in/platform blocks may be bypassed for the command executable.
+# User, project, and CLI block policy remains authoritative.
+_command_has_custom_block=0
+if [[ -n "${COMMAND_BINARY_PATH}" ]]; then
+  for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+    case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
+      config|project|cli|defense)
+        if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "${ALL_BLOCKED[$_blocked_i]}"; then
+          _command_has_custom_block=1
+          break
+        fi
+        ;;
+    esac
+  done
 fi
 
 if [[ "$PLATFORM" == "darwin" ]]; then
   # macOS: sandbox-exec
   if [[ "${STRICT}" -eq 1 ]]; then
-    PROFILE=$(generate_strict_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" "${ALL_BLOCKED[@]}")
+    PROFILE=$(generate_strict_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"})
   else
-    PROFILE=$(generate_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" "${ALL_BLOCKED[@]}")
+    PROFILE=$(generate_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"})
   fi
 
   # Append allow for command binary if it falls under a blocked path.
   # In sandbox-exec, later rules override earlier ones.
-  if [[ -n "${COMMAND_BINARY_PATH}" ]] && ! is_under_cli_block "${COMMAND_BINARY_PATH}"; then
-    for _bdir in "${ALL_BLOCKED[@]}"; do
-      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "${_bdir}"; then
+  if [[ -n "${COMMAND_BINARY_PATH}" && "$_command_has_custom_block" -eq 0 ]]; then
+    if [[ "$STRICT" -eq 1 ]]; then
+      _esc_bin="$(sbpl_escape "${COMMAND_BINARY_PATH}")"
+      PROFILE="${PROFILE}
+
+; Strict-mode command binary (exact auto-allow)
+(allow file-read* process-exec
+  (literal \"${_esc_bin}\")
+)"
+    else
+    for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+      case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in default|platform) ;; *) continue ;; esac
+      _bdir="${ALL_BLOCKED[$_blocked_i]}"
+      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "$_bdir"; then
         _esc_bin="$(sbpl_escape "${COMMAND_BINARY_PATH}")"
         PROFILE="${PROFILE}
 
@@ -2805,12 +3666,15 @@ if [[ "$PLATFORM" == "darwin" ]]; then
         break
       fi
     done
+    fi
   fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "${PROFILE}"
     echo ""
-    echo "# Command: ${COMMAND[*]}"
+    printf '# Command:'
+    printf ' %q' "${COMMAND[@]}"
+    printf '\n'
     echo "# Platform: macOS (sandbox-exec)"
     [[ "${STRICT}" -eq 1 ]] && echo "# Mode: strict (deny-default)"
     print_dry_run_env
@@ -2834,13 +3698,13 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     _profile_comments+=("# Sandbox errors below (grep for 'Operation not permitted' / 'Permission denied'):")
     write_log_header_json "${LOG_FILE}" "${_profile_comments[@]}"
     info "logging to ${LOG_FILE}"
-    if run_with_stderr_log "${LOG_FILE}" sandbox-exec -p "${PROFILE}" -- "${COMMAND[@]}"; then
+    if run_with_stderr_log "${LOG_FILE}" run_macos_sandbox_engine "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
     fi
   else
-    if sandbox-exec -p "${PROFILE}" -- "${COMMAND[@]}"; then
+    if run_macos_sandbox_engine "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
@@ -2850,21 +3714,27 @@ if [[ "$PLATFORM" == "darwin" ]]; then
 elif [[ "$PLATFORM" == "linux" ]]; then
   # Linux: bubblewrap
   if [[ "${STRICT}" -eq 1 ]]; then
-    build_strict_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" "${ALL_BLOCKED[@]}"
+    build_strict_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"}
   else
-    build_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" "${ALL_BLOCKED[@]}"
+    build_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"}
   fi
 
   # Linux parity with macOS: if the command binary itself is under a blocked
   # parent (defaults/config/project), re-bind that file so execution works.
   # Explicit CLI --block still wins and suppresses this auto-allow.
-  if [[ -n "${COMMAND_BINARY_PATH}" ]] && ! is_under_cli_block "${COMMAND_BINARY_PATH}"; then
-    for _bdir in "${ALL_BLOCKED[@]}"; do
-      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "${_bdir}"; then
+  if [[ -n "${COMMAND_BINARY_PATH}" && "$_command_has_custom_block" -eq 0 ]]; then
+    if [[ "$STRICT" -eq 1 ]]; then
+      BWRAP_ARGS+=(--ro-bind "${COMMAND_BINARY_PATH}" "${COMMAND_BINARY_PATH}")
+    else
+    for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+      case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in default|platform) ;; *) continue ;; esac
+      _bdir="${ALL_BLOCKED[$_blocked_i]}"
+      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "$_bdir"; then
         BWRAP_ARGS+=(--ro-bind "${COMMAND_BINARY_PATH}" "${COMMAND_BINARY_PATH}")
         break
       fi
     done
+    fi
   fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -2884,13 +3754,13 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     ensure_log_parent_dir "${LOG_FILE}"
     write_log_header_json "${LOG_FILE}" "# bwrap args: ${BWRAP_ARGS[*]}"
     info "logging to ${LOG_FILE}"
-    if run_with_stderr_log "${LOG_FILE}" bwrap "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
+    if run_with_stderr_log "${LOG_FILE}" /usr/bin/env "PATH=${SCODE_CALLER_PATH}" "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
     fi
   else
-    if bwrap "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
+    if /usr/bin/env "PATH=${SCODE_CALLER_PATH}" "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?

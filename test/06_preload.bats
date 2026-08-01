@@ -248,6 +248,28 @@ EOF
   [[ "$val" == *"--headless"* ]]
 }
 
+@test "preload injects --no-sandbox for asynchronous spawn execution" {
+  require_node
+  local val
+  val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const child = cp.spawn(bin, ['--headless']);
+    let out = '';
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.on('error', error => { console.error(error); process.exit(12); });
+    child.on('close', status => {
+      fs.unlinkSync(bin);
+      if (status !== 0) process.exit(status || 13);
+      process.stdout.write(out.trim());
+    });
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+  [[ "$val" == *"--headless"* ]]
+}
+
 @test "preload injects --no-sandbox for chromium spawnSync(options-only overload)" {
   require_runtime_sandbox
   require_node
@@ -329,7 +351,7 @@ EOF
     fs.unlinkSync(bin);
   " 2>/dev/null)
   # With word boundaries, 'my-chromecast-tool' should NOT match
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == "--flag" ]]
 }
 
 # ---------- no-sandbox.js: double-load guard ----------
@@ -387,7 +409,7 @@ EOF
     const cp = require('child_process');
     console.log(cp.spawn.name);
   " 2>/dev/null)
-  [[ "$val" != "patchedSpawn" ]]
+  [[ "$val" == "spawn" ]]
 }
 
 # ---------- Shell-wrapped Chromium injection ----------
@@ -406,6 +428,15 @@ EOF
   " 2>/dev/null)
   [[ "$val" == *"--no-sandbox"* ]]
   [[ "$val" == *"--headless"* ]]
+}
+
+@test "preload preserves non-Chromium shell:true spawnSync semantics" {
+  require_node
+  local script='const cp = require("child_process"); const cases = [["printf", ["%s", "$HOME"]], ["printf", ["%s", "*"]], ["printf", ["<%s>", "a b"]]]; const out = cases.map(([cmd,args]) => { const r=cp.spawnSync(cmd,args,{shell:true,encoding:"utf8"}); return {status:r.status,stdout:r.stdout,stderr:r.stderr}; }); process.stdout.write(JSON.stringify(out));'
+  local native patched
+  native=$(SCODE_SANDBOXED=0 NODE_OPTIONS="" node -e "$script" 2>/dev/null)
+  patched=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "$script" 2>/dev/null)
+  [ "$patched" = "$native" ]
 }
 
 @test "preload injects --no-sandbox for shell command string in spawn" {
@@ -520,7 +551,7 @@ EOF
     console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == "--flag" ]]
 }
 
 @test "preload shell wrapper does not inject for non-chromium" {
@@ -535,7 +566,7 @@ EOF
     console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == "--flag" ]]
 }
 
 @test "preload injects --no-sandbox for execFileSync bash -c wrapper" {
@@ -626,7 +657,7 @@ EOF
   local project_dir="$TEST_PROJECT/proj"
   local tmp_with_space="$TEST_PROJECT/tmp dir"
   mkdir -p "$install_lib" "$project_dir" "$tmp_with_space"
-  cp "$SCODE" "$install_root/scode"
+  cp "$SCODE_SOURCE" "$install_root/scode"
   cp "$NO_SANDBOX_JS" "$install_lib/no-sandbox.js"
   chmod +x "$install_root/scode"
 
@@ -642,27 +673,43 @@ EOF
 }
 
 @test "linux runtime: space-path preload symlink is cleaned up without --log" {
+  require_any_runtime_sandbox
   local install_root="$TEST_PROJECT/has space runtime"
   local install_lib="$install_root/lib"
   local project_dir="$TEST_PROJECT/proj-runtime"
-  local fake_bin="$TEST_PROJECT/fake-bin-runtime"
   local before after
-  mkdir -p "$install_lib" "$project_dir" "$fake_bin"
-  cp "$SCODE" "$install_root/scode"
+  mkdir -p "$install_lib" "$project_dir"
+  cp "$SCODE_SOURCE" "$install_root/scode"
   cp "$NO_SANDBOX_JS" "$install_lib/no-sandbox.js"
   chmod +x "$install_root/scode"
 
-  cat > "$fake_bin/bwrap" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$fake_bin/bwrap"
-
-  before=$(ls /tmp/scode-no-sandbox-${UID}-*.js 2>/dev/null | wc -l | tr -d ' ')
-  PATH="$fake_bin:$PATH" _SCODE_PLATFORM=linux run "$install_root/scode" -C "$project_dir" -- true
+  before=$(find /tmp -maxdepth 1 -type d -name "scode-no-sandbox.${UID}.*" 2>/dev/null | wc -l | tr -d ' ')
+  run "$install_root/scode" -C "$project_dir" -- true
   [ "$status" -eq 0 ]
-  after=$(ls /tmp/scode-no-sandbox-${UID}-*.js 2>/dev/null | wc -l | tr -d ' ')
+  after=$(find /tmp -maxdepth 1 -type d -name "scode-no-sandbox.${UID}.*" 2>/dev/null | wc -l | tr -d ' ')
   [ "$after" -eq "$before" ]
+}
+
+@test "inherited internal preload cleanup path is never deleted" {
+  local victim="$TEST_PROJECT/must-survive"
+  printf 'keep\n' > "$victim"
+  SCODE_NO_SANDBOX_LINK="$victim" run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [ -f "$victim" ]
+  [ "$(cat "$victim")" = "keep" ]
+}
+
+@test "inherited internal preload path is not mounted" {
+  local standalone_dir="$TEST_PROJECT/standalone"
+  local poisoned="$TEST_PROJECT/poisoned-preload.js"
+  mkdir -p "$standalone_dir"
+  cp "$SCODE_SOURCE" "$standalone_dir/scode"
+  chmod +x "$standalone_dir/scode"
+  printf 'throw new Error("poisoned")\n' > "$poisoned"
+
+  SCODE_NO_SANDBOX_JS="$poisoned" _SCODE_PLATFORM=linux run "$standalone_dir/scode" --dry-run --strict -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$poisoned"* ]]
 }
 
 # ---------- exec -> execFile double-injection prevention ----------
@@ -800,6 +847,31 @@ YAML
     fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
     const r = String(cp.execSync('timeout 30 \"' + bin + '\" --headless', { encoding: 'utf8' })).trim();
     console.log(r);
+    fs.unlinkSync(bin);
+  " 2>/dev/null)
+  [[ "$val" == *"--no-sandbox"* ]]
+}
+
+@test "preload injects --no-sandbox for timeout -- duration wrapper API" {
+  require_node
+  local tool_dir="$TEST_PROJECT/tools-timeout-delimiter"
+  mkdir -p "$tool_dir"
+  cat > "$tool_dir/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == "--" ]] && shift
+shift
+exec "$@"
+EOF
+  chmod +x "$tool_dir/timeout"
+  local val
+  val=$(PATH="$tool_dir:$PATH" SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
+    const cp = require('child_process');
+    const fs = require('fs');
+    const bin = '$TEST_PROJECT/chromium';
+    fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
+    const r = cp.spawnSync('timeout', ['--', '30', bin, '--headless'], { encoding: 'utf8' });
+    console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
   [[ "$val" == *"--no-sandbox"* ]]
@@ -1152,7 +1224,7 @@ EOF
     console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == "--flag" ]]
 }
 
 @test "preload injects --no-sandbox for spawn('env', ['-u', 'X', 'chromium'])" {
@@ -1420,7 +1492,7 @@ EOF
   [[ "$val" == *"--no-sandbox"* ]]
 }
 
-@test "preload does not inject --no-sandbox for bash -c -- shell form" {
+@test "preload injects --no-sandbox for bash -c -- shell form" {
   require_node
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
@@ -1432,10 +1504,10 @@ EOF
     console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == *"--no-sandbox"* ]]
 }
 
-@test "preload does not inject for unquoted bash -c -- chromium" {
+@test "preload injects effectively for unquoted bash -c -- chromium" {
   require_node
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
@@ -1447,7 +1519,7 @@ EOF
     console.log(out);
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == *"--no-sandbox"* ]]
 }
 
 @test "preload tokenizer handles FOO=\"bar baz\" assignment" {
@@ -1506,7 +1578,9 @@ EOF
     const fs = require('fs');
     const bin = '$TEST_PROJECT/chromium';
     fs.writeFileSync(bin, '#!/bin/bash\necho \"\\\$@\"', { mode: 0o755 });
-    const out = String(cp.execSync('env -S \"\\\"' + bin + '\\\" --headless\"', { encoding: 'utf8' })).trim();
+    const result = cp.spawnSync('env', ['-S', '\"' + bin + '\" --headless'], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(result.stderr || 'env -S failed');
+    const out = result.stdout.trim();
     console.log(out);
     fs.unlinkSync(bin);
   " 2>/dev/null)
@@ -1526,7 +1600,7 @@ EOF
     console.log(r.stdout.trim());
     fs.unlinkSync(bin);
   " 2>/dev/null)
-  [[ "$val" != *"--no-sandbox"* ]]
+  [[ "$val" == "--version" ]]
 }
 
 @test "preload nice wrapper does not double-inject --no-sandbox" {
@@ -1559,4 +1633,19 @@ EOF
     fs.unlinkSync(bin);
   " 2>/dev/null)
   [[ "$val" == *"--no-sandbox"* ]]
+}
+
+@test "custom block on scode lib is not reopened by preload mounting" {
+  local scode_lib
+  scode_lib="$(realpath "$BATS_TEST_DIRNAME/../lib")"
+  local platform
+  for platform in darwin linux; do
+    _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --block "$scode_lib" -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"browser preload disabled because custom policy blocks it"* ]]
+    [[ "$output" != *"NODE_OPTIONS=...--require="* ]]
+    if [[ "$platform" == "linux" ]]; then
+      [[ "$output" != *"--ro-bind ${scode_lib}/no-sandbox.js ${scode_lib}/no-sandbox.js"* ]]
+    fi
+  done
 }

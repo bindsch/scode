@@ -132,6 +132,26 @@ wait_for_file() {
   [[ "$output" == *"--tmpfs ${real_project}/secret"* ]]
   # Child should be re-bound
   [[ "$output" == *"--bind ${real_project}/secret/subdir ${real_project}/secret/subdir"* ]]
+  local before_child="${output%%--bind ${real_project}/secret/subdir*}"
+  [[ "$before_child" == *"--tmpfs ${real_project}/secret"* ]]
+}
+
+@test "linux dry-run: strict child allow is mounted after its blocked parent" {
+  mkdir -p "$TEST_PROJECT/strict-secret/subdir"
+  local real_project
+  real_project="$(realpath "$TEST_PROJECT")"
+  local child_marker="--ro-bind ${real_project}/strict-secret/subdir ${real_project}/strict-secret/subdir"
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --strict --ro \
+    --block "$TEST_PROJECT/strict-secret" \
+    --allow "$TEST_PROJECT/strict-secret/subdir" \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--tmpfs ${real_project}/strict-secret"* ]]
+  [[ "$output" == *"${child_marker}"* ]]
+  local after_block="${output##*--tmpfs ${real_project}/strict-secret}"
+  [[ "$after_block" == *"${child_marker}"* ]]
+  local after_child="${output##*${child_marker}}"
+  [[ "$after_child" == *"--ro-bind ${real_project} ${real_project}"* ]]
 }
 
 @test "linux dry-run: warns when --allow child under blocked parent is missing" {
@@ -183,38 +203,10 @@ wait_for_file() {
   [[ "$output" == *"--ro-bind ${real_project}"* ]]
 }
 
-@test "linux runtime: executes through bwrap invocation path" {
-  local fake_bin="$TEST_PROJECT/fake-bin"
-  local fake_bwrap="$fake_bin/bwrap"
-  local bwrap_log="$TEST_PROJECT/bwrap-args.log"
-  local real_project
-  real_project="$(realpath "$TEST_PROJECT")"
-
-  mkdir -p "$fake_bin"
-  cat > "$fake_bwrap" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-printf '%s\n' "$*" > "${BWRAP_LOG_FILE:?missing BWRAP_LOG_FILE}"
-while [[ $# -gt 0 ]]; do
-  if [[ "$1" == "--" ]]; then
-    shift
-    exec "$@"
-  fi
-  shift
-done
-echo "missing -- separator" >&2
-exit 2
-EOF
-  chmod +x "$fake_bwrap"
-
-  PATH="$fake_bin:$PATH" BWRAP_LOG_FILE="$bwrap_log" run linux_runtime true
-  [ "$status" -eq 0 ]
-  [ -f "$bwrap_log" ]
-
-  local args
-  args="$(cat "$bwrap_log")"
-  [[ "$args" == *"--bind $HOME $HOME"* ]]
-  [[ "$args" == *"--chdir ${real_project}"* ]]
+@test "linux runtime: test platform override cannot bypass the host engine" {
+  _SCODE_PLATFORM=linux run "$SCODE" -C "$TEST_PROJECT" -- /usr/bin/true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"only permitted with --dry-run"* ]]
 }
 
 @test "linux runtime: real bwrap command runs on linux hosts" {
@@ -325,12 +317,30 @@ EOF
   [[ "$output" != *"--tmpfs ${real_project}/secret-token"* ]]
 }
 
-@test "linux dry-run: nonexistent blocked path is skipped" {
+@test "linux dry-run: FIFO and symlink blocks use inert file binds" {
+  local fifo_path="$TEST_PROJECT/blocked.fifo"
+  local link_path="$TEST_PROJECT/blocked.link"
+  local target_path="$TEST_PROJECT/link-target"
+  mkfifo "$fifo_path"
+  printf 'target\n' > "$target_path"
+  ln -s "$target_path" "$link_path"
+  local real_project
+  real_project="$(realpath "$TEST_PROJECT")"
+
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run \
+    --block "$fifo_path" --block "$link_path" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ro-bind /dev/null ${real_project}/blocked.fifo"* ]]
+  # resolve_access_path canonicalizes the symlink before policy construction.
+  [[ "$output" == *"--ro-bind /dev/null ${real_project}/link-target"* ]]
+}
+
+@test "linux dry-run: nonexistent blocked path with missing parent fails closed" {
   _SCODE_PLATFORM=linux run "$SCODE" --dry-run \
     --block /nonexistent/path/xyz \
     -C "$TEST_PROJECT" -- true
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"/nonexistent/path/xyz"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot enforce Linux block because its parent does not exist"* ]]
 }
 
 # ---------- Linux: bwrap security flags ----------
@@ -363,10 +373,23 @@ EOF
 
 # ---------- Linux: XDG_RUNTIME_DIR ----------
 
-@test "linux dry-run: binds XDG_RUNTIME_DIR when set" {
-  XDG_RUNTIME_DIR="/run/user/1000" _SCODE_PLATFORM=linux run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+@test "linux dry-run: rejects XDG_RUNTIME_DIR outside /run/user/UID" {
+  local runtime_dir="$TEST_PROJECT/runtime"
+  mkdir "$runtime_dir"
+  chmod 700 "$runtime_dir"
+  local runtime_real
+  runtime_real="$(realpath "$runtime_dir")"
+  XDG_RUNTIME_DIR="$runtime_dir" _SCODE_PLATFORM=linux run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"--bind /run/user/1000 /run/user/1000"* ]]
+  [[ "$output" == *"ignoring unsafe XDG_RUNTIME_DIR"* ]]
+  [[ "$output" != *"--bind $runtime_real $runtime_real"* ]]
+}
+
+@test "linux dry-run: rejects XDG_RUNTIME_DIR root bind" {
+  XDG_RUNTIME_DIR="/" _SCODE_PLATFORM=linux run "$SCODE" --dry-run -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ignoring unsafe XDG_RUNTIME_DIR"* ]]
+  [[ "$output" != *"--bind / /"* ]]
 }
 
 # ---------- Linux: --strict does not bind HOME ----------
@@ -389,12 +412,12 @@ EOF
   [[ "$output" == *"--tmpfs $HOME/.scode-test-nonexistent-$$"* ]]
 }
 
-@test "linux dry-run: non-existent path with missing parent is skipped" {
+@test "linux dry-run: non-existent path with missing parent fails closed" {
   _SCODE_PLATFORM=linux run "$SCODE" --dry-run \
     --block /nonexistent-parent-$$/child \
     -C "$TEST_PROJECT" -- true
-  [ "$status" -eq 0 ]
-  [[ "$output" != *"/nonexistent-parent-$$"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot enforce Linux block because its parent does not exist"* ]]
 }
 
 # ---------- Linux strict: file-level --allow ----------
@@ -434,7 +457,7 @@ EOF
 
 # ---------- Linux: project dir under blocked parent ----------
 
-@test "linux dry-run: project dir under blocked parent is re-bound" {
+@test "linux dry-run: custom block covering project fails closed" {
   local blocked_parent="$TEST_PROJECT/linux-blocked"
   local project="$blocked_parent/myproject"
   mkdir -p "$project"
@@ -443,11 +466,8 @@ EOF
   local real_blocked
   real_blocked="$(realpath "$blocked_parent")"
   _SCODE_PLATFORM=linux run "$SCODE" --dry-run --block "$blocked_parent" -C "$project" -- true
-  [ "$status" -eq 0 ]
-  # Parent should be blocked
-  [[ "$output" == *"--tmpfs ${real_blocked}"* ]]
-  # Project should be re-bound after
-  [[ "$output" == *"--bind ${real_project} ${real_project}"* ]]
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"custom block covers the project directory"* ]]
 }
 
 # ---------- Linux dry-run: config scalars ----------
@@ -503,7 +523,7 @@ YAML
   mkdir -p "$secret_dir"
   local real_secret_dir
   real_secret_dir="$(realpath "$secret_dir")"
-  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --block "$blocked_parent" --block "$secret_dir" -C "$project_dir" -- true
+  _SCODE_PLATFORM=linux run "$SCODE" --dry-run --block "$secret_dir" -C "$project_dir" -- true
   [ "$status" -eq 0 ]
   # The bwrap args should contain --tmpfs for the secrets subdir after the project bind
   [[ "$output" == *"--tmpfs ${real_secret_dir}"* ]]
@@ -525,7 +545,7 @@ YAML
 
 # ---------- Linux command-binary auto-allow parity ----------
 
-@test "linux dry-run: config blocked dir auto-allows command binary file" {
+@test "linux dry-run: config blocked dir prevents command-binary auto-allow" {
   local blocked_dir="$TEST_PROJECT/config-blocked-bin"
   mkdir -p "$blocked_dir"
   local fake_tool="$blocked_dir/mytool"
@@ -540,7 +560,7 @@ blocked:
 YAML
   _SCODE_PLATFORM=linux run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- "$fake_tool"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"--ro-bind ${real_tool} ${real_tool}"* ]]
+  [[ "$output" != *"--ro-bind ${real_tool} ${real_tool}"* ]]
 }
 
 @test "linux dry-run: CLI --block suppresses command-binary auto-allow" {

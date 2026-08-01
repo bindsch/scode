@@ -1,10 +1,11 @@
 // Property-based and regression tests for the no-sandbox.js shell tokenizer
-// and injection logic. Uses node:test (Node 18+) and fast-check.
+// and injection logic. Uses node:test (Node 22+) and fast-check.
 
 'use strict';
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fc = require('fast-check');
 
 const {
@@ -17,15 +18,18 @@ const {
   isWrapperBinary,
   findCommandToken,
   injectNoSandboxCommand,
+  patchEnvWrapperArgs,
+  patchWrapperArgs,
 } = require('../lib/no-sandbox');
 
 // ===== Arbitrary helpers =====
 
 // Simple word: alphanumeric, dashes, dots, underscores, slashes (no shell metacharacters)
-const simpleWord = fc.stringOf(
-  fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./'.split('')),
-  { minLength: 1, maxLength: 30 }
-);
+const simpleWord = fc.string({
+  unit: fc.constantFrom(...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./'.split('')),
+  minLength: 1,
+  maxLength: 30,
+});
 
 // A word that is NOT a shell operator or empty
 const nonOperatorWord = simpleWord.filter(w => !['|', '||', '&&', ';', '&', '(', ')'].includes(w));
@@ -171,6 +175,10 @@ describe('isChromiumBinary', () => {
   it('rejects electron-builder', () => assert.ok(!isChromiumBinary('electron-builder')));
   it('rejects electron-forge', () => assert.ok(!isChromiumBinary('electron-forge')));
   it('rejects electron-packager', () => assert.ok(!isChromiumBinary('electron-packager')));
+  it('rejects chrome-exporter', () => assert.ok(!isChromiumBinary('chrome-exporter')));
+  it('rejects chromium-backup', () => assert.ok(!isChromiumBinary('chromium-backup')));
+  it('detects macOS Google Chrome binary', () => assert.ok(isChromiumBinary('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome')));
+  it('detects brave-browser stable channel', () => assert.ok(isChromiumBinary('brave-browser-stable')));
   it('detects headless-shell', () => assert.ok(isChromiumBinary('headless-shell')));
   it('detects headless_shell', () => assert.ok(isChromiumBinary('headless_shell')));
   it('detects full path /usr/bin/chromium', () => assert.ok(isChromiumBinary('/usr/bin/chromium')));
@@ -415,6 +423,16 @@ describe('injectNoSandboxCommand', () => {
     assert.ok(result.includes('--no-sandbox'));
   });
 
+  it('regression: timeout -- 30 chromium consumes duration after delimiter', () => {
+    const result = injectNoSandboxCommand('timeout -- 30 chromium');
+    assert.ok(result.includes('chromium --no-sandbox'), result);
+  });
+
+  it('regression: taskset -- 0x1 chromium consumes mask after delimiter', () => {
+    const result = injectNoSandboxCommand('taskset -- 0x1 chromium');
+    assert.ok(result.includes('chromium --no-sandbox'), result);
+  });
+
   it('regression: timeout --foreground chromium (no duration token)', () => {
     const result = injectNoSandboxCommand('timeout --foreground chromium');
     assert.ok(result.includes('--no-sandbox'),
@@ -460,26 +478,135 @@ describe('injectNoSandboxCommand', () => {
       `expected injection for "timeout -p 30 chromium": "${result}"`);
   });
 
-  // --- shell -c semantics: `--` after -c is the command string itself ---
+  // --- shell -c semantics: `--` after -c is an option delimiter ---
 
-  it('regression: bash -c -- "chromium --headless" is unchanged', () => {
+  it('regression: bash -c -- "chromium --headless" is patched', () => {
     const cmd = 'bash -c -- "chromium --headless"';
-    assert.strictEqual(injectNoSandboxCommand(cmd), cmd);
+    const result = injectNoSandboxCommand(cmd);
+    assert.ok(result.includes('bash -c -- "chromium --no-sandbox --headless"'),
+      `expected command after -- to be patched: "${result}"`);
   });
 
-  it('regression: sh -c -- "chromium" is unchanged', () => {
+  it('regression: sh -c -- "chromium" is patched', () => {
     const cmd = 'sh -c -- "chromium"';
-    assert.strictEqual(injectNoSandboxCommand(cmd), cmd);
+    const result = injectNoSandboxCommand(cmd);
+    assert.ok(result.includes('sh -c -- "chromium --no-sandbox"'),
+      `expected command after -- to be patched: "${result}"`);
   });
 
-  it('regression: bash -c -- chromium is unchanged', () => {
+  it('regression: bash -c -- chromium remains one effective command argument', () => {
     const cmd = 'bash -c -- chromium';
-    assert.strictEqual(injectNoSandboxCommand(cmd), cmd);
+    const result = injectNoSandboxCommand(cmd);
+    assert.ok(/bash\s+-c\s+--\s+['"]chromium --no-sandbox['"]/.test(result),
+      `expected quoted command after --: "${result}"`);
   });
 
   it('regression: env -S "chromium --headless"', () => {
     const result = injectNoSandboxCommand('env -S "chromium --headless"');
     assert.ok(result.includes('env -S "chromium --no-sandbox --headless"'),
       `expected injection in env -S split string: "${result}"`);
+  });
+
+  it('regression: newline separates shell commands', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('echo ready\nchromium --headless'),
+      'echo ready\nchromium --no-sandbox --headless'
+    );
+  });
+
+  it('regression: shell negation and brace groups preserve command position', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('! chromium; { chromium --headless; }'),
+      '! chromium --no-sandbox; { chromium --no-sandbox --headless; }'
+    );
+  });
+
+  it('regression: env options with values are skipped before Chromium', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('env -C /tmp chromium --headless'),
+      'env -C /tmp chromium --no-sandbox --headless'
+    );
+  });
+
+  it('regression: inline env split-string value is patched', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('env --split-string="chromium --headless"'),
+      'env --split-string="chromium --no-sandbox --headless"'
+    );
+  });
+
+  it('regression: nested single-quoted shell commands stay valid', () => {
+    const result = injectNoSandboxCommand("bash -c 'bash -c chromium'");
+    execFileSync('/bin/bash', ['-n', '-c', result]);
+    assert.strictEqual((result.match(/--no-sandbox/g) || []).length, 1, result);
+    assert.match(result, /chromium --no-sandbox/);
+  });
+
+  it('regression: env split strings with nested shell commands inject once', () => {
+    const result = injectNoSandboxCommand("env -S 'bash -c chromium'");
+    execFileSync('/bin/bash', ['-n', '-c', result]);
+    assert.strictEqual((result.match(/--no-sandbox/g) || []).length, 1, result);
+  });
+
+  it('regression: absolute wrapper paths are recognized', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('/usr/bin/env chromium'),
+      '/usr/bin/env chromium --no-sandbox'
+    );
+    assert.strictEqual(
+      injectNoSandboxCommand('/usr/bin/timeout 3 chromium'),
+      '/usr/bin/timeout 3 chromium --no-sandbox'
+    );
+  });
+
+  it('regression: time format flags consume their value', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand("time -f '%e' chromium"),
+      "time -f '%e' chromium --no-sandbox"
+    );
+  });
+
+  it('regression: if and while conditions preserve command position', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('if chromium; then echo ok; fi'),
+      'if chromium --no-sandbox; then echo ok; fi'
+    );
+    assert.strictEqual(
+      injectNoSandboxCommand('while chromium; do echo ok; done'),
+      'while chromium --no-sandbox; do echo ok; done'
+    );
+  });
+
+  it('regression: escaped separators and comments do not create commands', () => {
+    assert.strictEqual(
+      injectNoSandboxCommand('echo harmless \\; chromium'),
+      'echo harmless \\; chromium'
+    );
+    assert.strictEqual(
+      injectNoSandboxCommand('echo ok # chromium'),
+      'echo ok # chromium'
+    );
+  });
+
+  it('unsupported substitutions and heredocs are preserved byte-for-byte', () => {
+    for (const command of ['echo $(chromium)', 'echo `chromium`', 'cat <<EOF\nchromium\nEOF']) {
+      assert.strictEqual(injectNoSandboxCommand(command), command);
+    }
+  });
+});
+
+describe('wrapper argv patching', () => {
+  it('does not mistake a sudo prompt value for a Chromium flag', () => {
+    assert.deepStrictEqual(
+      patchWrapperArgs('sudo', ['-p', '--no-sandbox', 'chromium']),
+      ['-p', '--no-sandbox', 'chromium', '--no-sandbox']
+    );
+  });
+
+  it('does not mistake an env argv0 value for a Chromium flag', () => {
+    assert.deepStrictEqual(
+      patchEnvWrapperArgs(['--argv0', '--no-sandbox', 'chromium']),
+      ['--argv0', '--no-sandbox', 'chromium', '--no-sandbox']
+    );
   });
 });

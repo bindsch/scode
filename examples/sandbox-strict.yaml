@@ -9,11 +9,10 @@ strict: true
 
 # Additional directories to explicitly block
 blocked:
-  - ~/.ssh
   - ~/Dropbox
   - ~/OneDrive
 
 # In strict mode, only the project dir and system paths are allowed.
-# Use "allowed" to grant access to specific extra directories.
+# Use "allowed" to grant read-write access to specific extra directories.
 allowed:
   # - ~/shared-libs

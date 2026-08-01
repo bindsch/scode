@@ -151,6 +151,7 @@ load test_helper
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- opencode
   [ "$status" -eq 0 ]
   [[ "$output" == *"$HOME/.config/opencode"* ]]
+  [[ "$output" == *"$HOME/.local/share/opencode"* ]]
 }
 
 @test "strict+goose auto-allows ~/.config/goose" {
@@ -171,32 +172,18 @@ load test_helper
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- claude
   [ "$status" -eq 0 ]
-  # Profile should have an allow rule for the harness config dir
-  [[ "$output" == *"(allow file-read* file-write*"* ]]
+  # Harness state is visible but immutable in strict mode.
+  [[ "$output" == *"Harness auto-allowed directories (read-only)"* ]]
   [[ "$output" == *"(subpath \"$HOME/.claude\")"* ]]
 }
 
-@test "strict+harness dry-run includes RO Library carve-outs on macOS" {
+@test "strict+harness does not reopen macOS browser or Keychain data" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- claude
   [ "$status" -eq 0 ]
-  # Read-only carve-out for Keychains
-  [[ "$output" == *"Harness auto-allowed directories (read-only)"* ]]
-  [[ "$output" == *"(subpath \"$HOME/Library/Keychains\")"* ]]
-  # RW carve-outs for Application Support, Caches, etc.
-  [[ "$output" == *"(subpath \"$HOME/Library/Application Support\")"* ]]
-  [[ "$output" == *"(subpath \"$HOME/Library/Caches\")"* ]]
-}
-
-@test "strict+harness: Keychains is file-read* only (not file-write*)" {
-  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- claude
-  [ "$status" -eq 0 ]
-  # Extract the RO section
-  local ro_section
-  ro_section=$(echo "$output" | sed -n '/Harness auto-allowed.*read-only/,/^$/p')
-  [[ "$ro_section" == *"(allow file-read*"* ]]
-  [[ "$ro_section" != *"file-write*"* ]]
+  [[ "$output" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" != *"(subpath \"$HOME/Library/Application Support\")"* ]]
+  [[ "$output" != *"(subpath \"$HOME/Library/Caches\")"* ]]
 }
 
 # ---------- Strict + harness: --block override ----------
@@ -208,14 +195,6 @@ load test_helper
   local info_line
   info_line=$(echo "$output" | grep "auto-allowing" || true)
   [[ "$info_line" != *"$HOME/.claude"* ]]
-}
-
-@test "--block specific Library dir suppresses that auto-allow" {
-  run "$SCODE" --dry-run --strict --block "$HOME/Library/Keychains" -C "$TEST_PROJECT" -- claude
-  [ "$status" -eq 0 ]
-  local info_line
-  info_line=$(echo "$output" | grep "auto-allowing" || true)
-  [[ "$info_line" != *"Keychains"* ]]
 }
 
 @test "config blocked suppresses harness auto-allow" {
@@ -264,28 +243,95 @@ load test_helper
 
 # ---------- Additional harness auto-allow coverage ----------
 
-@test "strict+droid auto-allows ~/.droid" {
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- droid
+assert_strict_harness_paths() {
+  local harness="$1"
+  shift
+
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- "$harness"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOME/.droid"* ]]
+  [[ "$output" == *"strict+$harness"* ]]
+
+  local expected_path
+  for expected_path in "$@"; do
+    [[ "$output" == *"$expected_path"* ]]
+  done
 }
 
-@test "strict+qwen auto-allows ~/.config/qwen" {
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- qwen
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOME/.config/qwen"* ]]
+@test "strict+droid auto-allows ~/.factory" {
+  assert_strict_harness_paths droid "$HOME/.factory"
 }
 
-@test "strict+codemux auto-allows ~/.config/codemux" {
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- codemux
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOME/.config/codemux"* ]]
+@test "strict+qwen auto-allows ~/.qwen" {
+  assert_strict_harness_paths qwen "$HOME/.qwen"
 }
 
-@test "strict+pi auto-allows ~/.config/pi" {
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- pi
+@test "strict+codemux auto-allows current and legacy paths" {
+  assert_strict_harness_paths codemux "$HOME/.codemux" "$HOME/.config/codemux"
+}
+
+@test "strict+pi auto-allows ~/.pi/agent" {
+  assert_strict_harness_paths pi "$HOME/.pi/agent"
+}
+
+@test "strict+aider auto-allows config file and state directory" {
+  assert_strict_harness_paths aider "$HOME/.aider" "$HOME/.aider.conf.yml"
+}
+
+@test "strict+amp auto-allows config and OAuth state" {
+  assert_strict_harness_paths amp "$HOME/.config/amp" "$HOME/.amp"
+}
+
+@test "strict+crush auto-allows config and application state" {
+  assert_strict_harness_paths crush "$HOME/.config/crush" "$HOME/.local/share/crush"
+}
+
+@test "strict+cursor-agent auto-allows ~/.cursor" {
+  assert_strict_harness_paths cursor-agent "$HOME/.cursor"
+}
+
+@test "strict+copilot auto-allows config and Linux cache" {
+  assert_strict_harness_paths copilot "$HOME/.copilot" "$HOME/.cache/copilot"
+}
+
+@test "strict+cn auto-allows ~/.continue" {
+  assert_strict_harness_paths cn "$HOME/.continue"
+}
+
+@test "strict+kimi auto-allows current and legacy paths" {
+  assert_strict_harness_paths kimi "$HOME/.kimi-code" "$HOME/.kimi"
+}
+
+@test "strict+openhands auto-allows ~/.openhands" {
+  assert_strict_harness_paths openhands "$HOME/.openhands"
+}
+
+@test "strict+cline auto-allows ~/.cline" {
+  assert_strict_harness_paths cline "$HOME/.cline"
+}
+
+@test "strict+kiro-cli auto-allows ~/.kiro" {
+  assert_strict_harness_paths kiro-cli "$HOME/.kiro"
+}
+
+@test "strict+auggie auto-allows ~/.augment" {
+  assert_strict_harness_paths auggie "$HOME/.augment"
+}
+
+@test "strict+grok auto-allows the default GROK_HOME" {
+  assert_strict_harness_paths grok "$HOME/.grok"
+}
+
+@test "strict+grok does not auto-allow an environment-controlled GROK_HOME" {
+  local custom_home="$TEST_PROJECT/custom-grok-home"
+  mkdir -p "$custom_home"
+  export GROK_HOME="$custom_home"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- grok
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOME/.config/pi"* ]]
+  local custom_home_real
+  custom_home_real="$(realpath "$custom_home")"
+  [[ "$output" != *"$custom_home_real"* ]]
+  [[ "$output" == *"$HOME/.grok"* ]]
+  unset GROK_HOME
 }
 
 # ---------- --trust presets ----------
@@ -301,6 +347,13 @@ load test_helper
   [[ "$output" == *"Project directory (read-only)"* ]]
   # scrub-env active
   [[ "$output" == *"scrub-env active"* ]]
+}
+
+@test "--trust untrusted does not auto-open harness credentials" {
+  run "$SCODE" --trust untrusted --dry-run -C "$TEST_PROJECT" -- claude
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$HOME/.claude"* ]]
+  [[ "$output" != *"auto-allowing"* ]]
 }
 
 @test "--trust trusted sets rw (default behavior)" {
@@ -450,12 +503,16 @@ YAML
 }
 
 @test "detect_harness: timeout -- claude detected" {
-  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- timeout -- 30 claude
   [ "$status" -eq 0 ]
-  # After --, '30' is the command, not timeout's duration
-  # So 'claude' won't be detected — verify graceful handling
-  [[ "$status" -eq 0 ]]
+  [[ "$output" == *"strict+claude"* ]]
+  [[ "$output" == *"$HOME/.claude"* ]]
+}
+
+@test "detect_harness: taskset -- mask claude detected" {
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- taskset -- 0x1 claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
 }
 
 # ---------- P1 regression: -p not a flag-with-value ----------
@@ -478,6 +535,18 @@ YAML
 @test "detect_harness: bash -c -- claude detected" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c -- "claude --version"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: env bash -c claude detected recursively" {
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- env FOO=bar bash -c "claude --version"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "detect_harness: nice bash -c claude detected recursively" {
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- nice bash -c "claude --version"
   [ "$status" -eq 0 ]
   [[ "$output" == *"strict+claude"* ]]
 }

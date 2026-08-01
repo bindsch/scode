@@ -5,4 +5,5 @@
 .idea/
 .vscode/
 node_modules/
-package-lock.json
+coverage/
+.claude/settings.local.json

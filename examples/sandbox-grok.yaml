@@ -1,0 +1,12 @@
+# scode Grok CLI defense
+# Use with: scode --config examples/sandbox-grok.yaml grok
+# Or copy to ~/.config/scode/sandbox.yaml.
+
+# For a detected Grok command, this forces strict mode and environment
+# scrubbing, blocks Git history and common dotenv files, and exports current
+# collection/telemetry compatibility switches as defense in depth. Those
+# vendor switches are not the security boundary. Network stays enabled so
+# cloud inference works; files intentionally readable in the project can still
+# be sent as model input. `net: off` blocks normal IP egress, but cannot revoke
+# standard streams or explicitly allowed pathname Unix sockets.
+grok_defense: true

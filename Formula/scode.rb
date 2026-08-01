@@ -1,7 +1,7 @@
 class Scode < Formula
   desc "Safe sandbox wrapper for AI coding harnesses"
   homepage "https://github.com/bindsch/scode"
-  url "https://github.com/bindsch/scode.git", tag: "v0.2.0"
+  url "https://github.com/bindsch/scode.git", tag: "v0.2.0", revision: "467b53761236d8647428ab73d7246f86426d38bb"
   license "MIT"
 
   head "https://github.com/bindsch/scode.git", branch: "main"
@@ -13,18 +13,26 @@ class Scode < Formula
   def install
     bin.install "scode"
     (lib/"scode").install "lib/no-sandbox.js"
+    pkgshare.install "LICENSE"
     (pkgshare/"examples").install Dir["examples/*.yaml"]
   end
 
   test do
     # Version and file presence
-    assert_match(/^scode \d+\.\d+\.\d+$/, shell_output("#{bin}/scode --version").strip)
-    assert_predicate lib/"scode/no-sandbox.js", :exist?
-    assert_predicate pkgshare/"examples/sandbox.yaml", :exist?
-    assert_predicate pkgshare/"examples/sandbox-strict.yaml", :exist?
-    assert_predicate pkgshare/"examples/sandbox-paranoid.yaml", :exist?
-    assert_predicate pkgshare/"examples/sandbox-permissive.yaml", :exist?
-    assert_predicate pkgshare/"examples/sandbox-cloud-eng.yaml", :exist?
+    version_output = shell_output("#{bin}/scode --version").strip
+    if build.head?
+      assert_match(/^scode \d+\.\d+\.\d+$/, version_output)
+    else
+      assert_equal "scode 0.2.0", version_output
+    end
+    assert_path_exists lib/"scode/no-sandbox.js"
+    assert_path_exists pkgshare/"LICENSE"
+    assert_path_exists pkgshare/"examples/sandbox.yaml"
+    assert_path_exists pkgshare/"examples/sandbox-strict.yaml"
+    assert_path_exists pkgshare/"examples/sandbox-paranoid.yaml"
+    assert_path_exists pkgshare/"examples/sandbox-permissive.yaml"
+    assert_path_exists pkgshare/"examples/sandbox-cloud-eng.yaml"
+    assert_path_exists pkgshare/"examples/sandbox-grok.yaml"
 
     # Help output covers key flags and subcommands
     help = shell_output("#{bin}/scode --help")
