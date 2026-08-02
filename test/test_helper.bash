@@ -30,6 +30,13 @@ require_node() {
   command -v node >/dev/null 2>&1 || skip "node not installed"
 }
 
+# Some preload tests exercise rewriting through a wrapper binary such as
+# `timeout` or `stdbuf`. These ship with GNU coreutils and are absent on stock
+# macOS, so the behavior can only be asserted where the wrapper actually exists.
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || skip "$1 not installed"
+}
+
 dry_run_cmd() {
   "$SCODE" --dry-run -C "$TEST_PROJECT" -- "$@"
 }

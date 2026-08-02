@@ -2886,6 +2886,7 @@ if [[ "${COMMAND[0]}" == */* ]]; then
     _command_lookup="${PROJECT_DIR}/${COMMAND[0]}"
   fi
 else
+  # shellcheck disable=SC2015  # `|| true` only forces an empty lookup on failure
   _command_lookup="$(cd "${PROJECT_DIR}" && PATH="$SCODE_CALLER_PATH" type -P -- "${COMMAND[0]}" 2>/dev/null || true)"
   case "$_command_lookup" in
     /*) ;;
@@ -3556,6 +3557,7 @@ if [[ -n "${SCODE_LIB_DIR}" && -f "${SCODE_LIB_DIR}/no-sandbox.js" ]]; then
       SCODE_NO_SANDBOX_JS="${SCODE_NO_SANDBOX_LINK}"
     else
       warning "failed to create a space-free no-sandbox preload path"
+      # shellcheck disable=SC2015  # best-effort cleanup; `|| true` is the intent
       [[ -n "${SCODE_NO_SANDBOX_TMPDIR}" ]] && rmdir "${SCODE_NO_SANDBOX_TMPDIR}" 2>/dev/null || true
       SCODE_NO_SANDBOX_LINK=""
       SCODE_NO_SANDBOX_TMPDIR=""
@@ -3595,7 +3597,10 @@ print_dry_run_env() {
 
 # -------- Generate and run --------
 
-# shellcheck disable=SC2329  # invoked via EXIT trap below
+# Older shellcheck (Ubuntu 24.04 ships 0.9) reports the same "never invoked"
+# condition as SC2317; 0.10+ uses SC2329. Disable both so the lint result does
+# not depend on which shellcheck the environment happens to provide.
+# shellcheck disable=SC2329,SC2317  # invoked via EXIT trap below
 cleanup_no_sandbox_link() {
   if [[ -n "${SCODE_NO_SANDBOX_LINK:-}" ]]; then
     rm -f "${SCODE_NO_SANDBOX_LINK}"

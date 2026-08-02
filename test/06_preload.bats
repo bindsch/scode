@@ -839,6 +839,7 @@ YAML
 
 @test "preload injects --no-sandbox for timeout wrapper" {
   require_node
+  require_command timeout
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
@@ -925,6 +926,7 @@ EOF
 
 @test "preload injects --no-sandbox for stdbuf wrapper" {
   require_node
+  require_command stdbuf
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
@@ -1279,6 +1281,7 @@ EOF
 
 @test "preload injects --no-sandbox for spawn('timeout', ['30', 'chromium', ...])" {
   require_node
+  require_command timeout
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
