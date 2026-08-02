@@ -75,17 +75,24 @@ render() {
   sed "${sed_args[@]}" "$README"
 }
 
+# Global so the EXIT trap can still resolve it under `set -u`; a `local` in
+# main() is already out of scope by the time the trap fires.
+_tmp_output=""
+cleanup() {
+  [ -n "$_tmp_output" ] && rm -f "$_tmp_output"
+  return 0
+}
+
 main() {
-  local tmp
   case "${1:-}" in
     update)
-      tmp="$(mktemp)"
-      trap 'rm -f "$tmp"' EXIT
-      render > "$tmp"
-      if cmp -s "$tmp" "$README"; then
+      _tmp_output="$(mktemp)"
+      trap cleanup EXIT
+      render > "$_tmp_output"
+      if cmp -s "$_tmp_output" "$README"; then
         echo "release-pins: README.md already current ($(release_tag) @ $(release_commit))"
       else
-        cat "$tmp" > "$README"
+        cat "$_tmp_output" > "$README"
         echo "release-pins: README.md updated to $(release_tag) @ $(release_commit)"
       fi
       ;;
