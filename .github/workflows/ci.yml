@@ -47,6 +47,22 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y bats bubblewrap kcov shellcheck
+      - run: sudo apt-get update && sudo apt-get install -y bats bubblewrap shellcheck
+      # Ubuntu 24.04 dropped the kcov package, so build the pinned release from
+      # source. Keep KCOV_REF on a tag: the shell coverage gate depends on it.
+      - name: Install kcov
+        env:
+          KCOV_REF: v43
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y cmake binutils-dev libcurl4-openssl-dev \
+            zlib1g-dev libdw-dev libiberty-dev libssl-dev ninja-build
+          git clone --depth 1 --branch "$KCOV_REF" \
+            https://github.com/SimonKagstrom/kcov.git "$RUNNER_TEMP/kcov"
+          cmake -S "$RUNNER_TEMP/kcov" -B "$RUNNER_TEMP/kcov/build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/kcov/build"
+          sudo cmake --install "$RUNNER_TEMP/kcov/build"
+          kcov --version
       - run: npm ci
       - run: make coverage
