@@ -7,6 +7,13 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- The shell line-coverage floor is now `SHELL_COVERAGE_MIN` (default 70%)
+  instead of a hardcoded 80%. kcov is Linux-only and cannot execute the
+  macOS-only halves of the script, so 80% was unreachable in CI. The JavaScript
+  coverage gate is unchanged at 80%.
+
 ### Fixed
 
 - Project configuration (`.scode.yaml`) and the config size limit were rejected
