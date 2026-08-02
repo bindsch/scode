@@ -4,18 +4,22 @@ Use this checklist before tagging a new `scode` release.
 
 ## 1) Version consistency
 
-- [ ] `scode` version constant matches release target:
+`PROGRAM_VERSION` in `scode` is the single source of truth. Everything else is
+derived from it, so there is exactly one version string to edit by hand.
+
+- [ ] Bump the version constant to the release target:
   - `scode` (`PROGRAM_VERSION`)
-- [ ] Homebrew formula points to the same version tag:
-  - `Formula/scode.rb` (`url ..., tag: "vX.Y.Z"`)
-- [ ] README beta/version banner matches:
-  - `README.md`
-- [ ] Manual install section uses parameterized `VERSION` variable:
-  - `README.md` — verify the example comment matches the release target
-- [ ] Packaging test expects the release version:
-  - `test/09_packaging.bats` — the `--version` assertion is a literal string
-- [ ] After tagging, repin the released commit SHA:
-  - `README.md` (`EXPECTED_COMMIT`, `COMMIT`) and `Formula/scode.rb` (`revision:`)
+- [ ] Move `[Unreleased]` changelog entries under the new version heading:
+  - `CHANGELOG.md`
+
+The README banner, the pinned install commit, and the manual-install SHA-256
+hashes are rewritten by `make release-pins` in step 7. The packaging test and
+the Homebrew formula both derive the expected version, so neither needs editing.
+
+The Homebrew formula lives only in the
+[`bindsch/homebrew-tap`](https://github.com/bindsch/homebrew-tap) repository.
+This repository intentionally does not carry a copy: two copies drifted in the
+past, and the tap is what users actually install from.
 
 ## 2) Automated checks
 
@@ -204,31 +208,52 @@ EOF
   make uninstall PREFIX=/tmp/scode-release-test
   ```
 
-## 7) Homebrew tap
+## 7) Tag, then repin the README
 
-- [ ] Update the Homebrew formula in the `bindsch/homebrew-tap` repository:
+The README pins the exact released commit and the SHA-256 hash of every
+manual-install artifact. Those values only exist once the tag exists, so tag
+first and derive them afterwards:
 
-  ```bash
-  # In ~/Programming/homebrew-tap
-  # Update Formula/scode.rb tag to the new version
-  # Commit and push
-  ```
+```bash
+git tag -a vX.Y.Z -m "scode vX.Y.Z"
+git push origin vX.Y.Z
+make release-pins        # rewrites README.md from tag vX.Y.Z
+make check-pins          # must pass
+git commit -am "docs: repin install artifacts to vX.Y.Z"
+```
 
-- [ ] Verify the in-repo `Formula/scode.rb` tag matches the release target.
-- [ ] Verify the formula's pinned `revision` resolves to the release tag commit.
+- [ ] `make check-pins` passes on `main` after the repin commit.
+
+## 8) Homebrew tap
+
+The formula lives only in `bindsch/homebrew-tap`. Its test derives the expected
+version from the tag, so only `url` needs editing:
+
+```bash
+# In ~/Programming/homebrew-tap
+# Formula/scode.rb: set tag: "vX.Y.Z" and revision: <commit from make check-pins>
+ruby -c Formula/scode.rb
+brew install --build-from-source bindsch/tap/scode
+brew test scode
+brew audit --strict bindsch/tap/scode
+```
+
+- [ ] Formula `tag:` matches the release target.
+- [ ] Formula `revision:` resolves to the release tag commit.
+- [ ] `brew test` and `brew audit --strict` both pass.
 - [ ] Verify release tags are signed. If signing is not yet configured, publish
   the exact commit ID and SHA-256 hashes for every manual-install artifact.
 - [ ] Verify GitHub branch/tag protection, secret scanning, and Dependabot are
   enabled before publishing.
 
-## 8) Release notes/changelog
+## 9) Release notes/changelog
 
 - [ ] Move user-visible items from `## [Unreleased]` into a new release section:
   - `## [X.Y.Z] - YYYY-MM-DD`
 - [ ] Ensure `[Unreleased]` remains at the top for the next cycle.
 - [ ] Remove placeholder-only text for the released version and include concrete user-visible changes.
 
-## 9) GitHub releases
+## 10) GitHub releases
 
 Create the target release first. If older releases must be backfilled afterward,
 explicitly re-mark the target release as latest.

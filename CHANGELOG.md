@@ -7,7 +7,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-08-02
+### Changed
+
+- The Homebrew formula now lives only in `bindsch/homebrew-tap`. The in-repo
+  copy is removed; the two had already drifted apart.
+- `PROGRAM_VERSION` is the single version string to edit for a release. The
+  README banner, pinned install commit, and manual-install SHA-256 hashes are
+  derived by `make release-pins`, and `make check-pins` verifies them.
+- The packaging test derives the expected version from the source launcher
+  instead of asserting a hardcoded string.
+
+### Added
+
+- `scripts/release-pins.sh` plus `make release-pins` / `make check-pins`.
 
 ### Added
 

@@ -25,9 +25,15 @@ load test_helper
   [ -f "$prefix/share/scode/examples/sandbox-cloud-eng.yaml" ]
   [ -f "$prefix/share/scode/examples/sandbox-grok.yaml" ]
 
+  # Derive the expectation from the source launcher so that bumping
+  # PROGRAM_VERSION does not require editing this test. The invariant under
+  # test is that `make install` ships the version in the working tree.
+  local source_version
+  source_version="$("$repo_root/scode" --version)"
+
   run "$prefix/bin/scode" --version
   [ "$status" -eq 0 ]
-  [ "$output" = "scode 0.3.0" ]
+  [ "$output" = "$source_version" ]
 
   printf 'user-owned\n' > "$prefix/share/scode/examples/unrelated.yaml"
 

@@ -11,7 +11,7 @@ EXAMPLE_FILES = \
 	examples/sandbox-cloud-eng.yaml \
 	examples/sandbox-grok.yaml
 
-.PHONY: install uninstall check-prefix test test-js lint coverage
+.PHONY: install uninstall check-prefix test test-js lint coverage release-pins check-pins
 
 check-prefix:
 	@case '$(PREFIX)' in \
@@ -71,3 +71,12 @@ coverage: lint
 		node_modules/.bin/c8 report --temp-directory="$$node_cov" --all \
 			--include='lib/no-sandbox.js' --reporter=text \
 			--check-coverage --lines=80 --functions=80 --branches=80 --statements=80
+
+# Rewrite the README install pins (commit + artifact checksums) from the
+# release tag. Run after tagging; see docs/RELEASE-GATE.md.
+release-pins:
+	./scripts/release-pins.sh update
+
+# Verify the README pins match the release tag without modifying anything.
+check-pins:
+	./scripts/release-pins.sh check
