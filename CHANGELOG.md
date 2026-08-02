@@ -7,12 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-02
+
 ### Changed
 
 - The shell line-coverage floor is now `SHELL_COVERAGE_MIN` (default 70%)
   instead of a hardcoded 80%. kcov is Linux-only and cannot execute the
   macOS-only halves of the script, so 80% was unreachable in CI. The JavaScript
   coverage gate is unchanged at 80%.
+- The Homebrew formula now lives only in `bindsch/homebrew-tap`. The in-repo
+  copy is removed; the two had already drifted apart.
+- `PROGRAM_VERSION` is the single version string to edit for a release. The
+  README banner, pinned install commit, and manual-install SHA-256 hashes are
+  derived by `make release-pins`, and `make check-pins` verifies them.
+- The packaging test derives the expected version from the source launcher
+  instead of asserting a hardcoded string.
 
 ### Fixed
 
@@ -22,19 +31,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   compared filesystem IDs instead of inodes. Stat access now dispatches on an
   explicitly detected flavor through `_stat_field`.
 
-### Changed
-
-- The Homebrew formula now lives only in `bindsch/homebrew-tap`. The in-repo
-  copy is removed; the two had already drifted apart.
-- `PROGRAM_VERSION` is the single version string to edit for a release. The
-  README banner, pinned install commit, and manual-install SHA-256 hashes are
-  derived by `make release-pins`, and `make check-pins` verifies them.
-- The packaging test derives the expected version from the source launcher
-  instead of asserting a hardcoded string.
-
 ### Added
 
 - `scripts/release-pins.sh` plus `make release-pins` / `make check-pins`.
+
+## [0.3.0] - 2026-08-02
 
 ### Added
 
