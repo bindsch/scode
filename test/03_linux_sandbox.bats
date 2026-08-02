@@ -210,15 +210,13 @@ wait_for_file() {
 }
 
 @test "linux runtime: real bwrap command runs on linux hosts" {
-  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
-  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  require_linux_bwrap
   run "$SCODE" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
 }
 
 @test "linux runtime: default network allows localhost TCP connect" {
-  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
-  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  require_linux_bwrap
   command -v node >/dev/null 2>&1 || skip "node not installed"
   local port_file="$TEST_PROJECT/linux-net-port-default"
   local ready_file="$TEST_PROJECT/linux-net-ready-default"
@@ -248,8 +246,7 @@ wait_for_file() {
 }
 
 @test "linux runtime: --no-net blocks localhost TCP connect" {
-  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
-  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  require_linux_bwrap
   command -v node >/dev/null 2>&1 || skip "node not installed"
   local port_file="$TEST_PROJECT/linux-net-port-nonet"
   local ready_file="$TEST_PROJECT/linux-net-ready-nonet"
@@ -279,8 +276,7 @@ wait_for_file() {
 }
 
 @test "linux runtime: --block denies reads to blocked path" {
-  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
-  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  require_linux_bwrap
   local blocked_dir="$TEST_PROJECT/linux-runtime-blocked"
   mkdir -p "$blocked_dir"
   echo "linux-secret" > "$blocked_dir/secret.txt"
@@ -290,8 +286,7 @@ wait_for_file() {
 }
 
 @test "linux runtime: --allow child path overrides parent --block" {
-  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
-  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  require_linux_bwrap
   local blocked_parent="$TEST_PROJECT/linux-runtime-parent"
   local allowed_child="$blocked_parent/allowed-child"
   mkdir -p "$allowed_child"

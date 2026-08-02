@@ -37,6 +37,43 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || skip "$1 not installed"
 }
 
+# bubblewrap can be installed yet unusable: Ubuntu 24.04 confines unprivileged
+# user namespaces through AppArmor, and most containers block them outright.
+# Probe an actual sandbox rather than trusting that the binary exists.
+require_linux_bwrap() {
+  [[ "$(uname -s)" != "Linux" ]] && skip "linux only"
+  command -v bwrap >/dev/null 2>&1 || skip "bwrap not installed"
+  bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true >/dev/null 2>&1 \
+    || skip "bubblewrap cannot create a sandbox in this environment"
+}
+
+# ---------- Platform-aware dry-run assertions ----------
+#
+# The dry-run rendering differs by platform: macOS prints an SBPL profile, Linux
+# prints the bubblewrap argv. These helpers assert the intended behavior so one
+# test covers both platforms instead of hardcoding one platform's syntax.
+
+# Linux renders the argv shell-quoted, so a path containing spaces or a hash
+# appears escaped. Accept either rendering.
+assert_output_has_path() {
+  local output="$1" path="$2" escaped
+  escaped="$(printf '%q' "$path")"
+  [[ "$output" == *"$path"* || "$output" == *"$escaped"* ]]
+}
+
+assert_dry_run_command() {
+  local output="$1" command_word="$2"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    [[ "$output" == *"# Command: $command_word"* ]]
+  else
+    [[ "$output" == *" -- $command_word"* ]]
+  fi
+}
+
+# Strict/non-strict and project read-write assertions already exist further down
+# as assert_strict_mode_output, assert_non_strict_mode_output, and
+# assert_project_read_write_output. Use those.
+
 dry_run_cmd() {
   "$SCODE" --dry-run -C "$TEST_PROJECT" -- "$@"
 }

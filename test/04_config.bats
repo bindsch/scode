@@ -333,7 +333,7 @@ allowed:
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/path with # hash"* ]]
+  assert_output_has_path "$output" "/tmp/path with # hash"
   [[ "$output" == *"$HOME/Documents/projects"* ]]
   [[ "$output" != *"blocked list entry"* ]]
   [[ "$output" != *"allowed list entry"* ]]
@@ -602,7 +602,7 @@ blocked:
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/path with # hash"* ]]
+  assert_output_has_path "$output" "/tmp/path with # hash"
 }
 
 @test "config preserves hash in single-quoted list paths" {
@@ -613,7 +613,7 @@ blocked:
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/path with # hash"* ]]
+  assert_output_has_path "$output" "/tmp/path with # hash"
 }
 
 @test "config accepts YAML escaped single quotes ('it''s-data')" {
@@ -624,7 +624,7 @@ blocked:
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/tmp/it's-data"* ]]
+  assert_output_has_path "$output" "/tmp/it's-data"
 }
 
 @test "config plain single-quoted value still works" {
@@ -934,6 +934,9 @@ YAML
 # ---------- YAML parser edge cases ----------
 
 @test "config: double-quoted value with backslash" {
+  # Asserts the SBPL backslash-escaping rule specifically; Linux renders a
+  # bubblewrap argv instead, where the rule does not apply.
+  [[ "$(uname -s)" == "Darwin" ]] || skip "asserts macOS SBPL escaping"
   local config_file="$TEST_PROJECT/dq-backslash.yaml"
   cat > "$config_file" <<'YAML'
 blocked:
@@ -981,13 +984,17 @@ YAML
 
 @test "config: unquoted path with spaces" {
   local config_file="$TEST_PROJECT/unquoted-spaces.yaml"
-  cat > "$config_file" <<'YAML'
+  # Linux fails closed when a block's parent does not exist, so the path has to
+  # be real for the parser result to reach the rendered profile on both platforms.
+  local blocked="$TEST_PROJECT/with spaces/dir"
+  mkdir -p "$blocked"
+  cat > "$config_file" <<YAML
 blocked:
-  - /path/with spaces/dir
+  - ${blocked}
 YAML
   run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/path/with spaces/dir"* ]]
+  assert_output_has_path "$output" "$blocked"
 }
 
 @test "config rejects unquoted list item containing literal space-hash fragment" {

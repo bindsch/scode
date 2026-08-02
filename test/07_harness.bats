@@ -340,11 +340,11 @@ assert_strict_harness_paths() {
   run "$SCODE" --trust untrusted --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
   # strict mode produces a deny-default profile
-  [[ "$output" == *"deny default"* ]]
+  assert_strict_mode_output "$output"
   # no-net: network should be denied
   [[ "$output" != *"(allow network"* ]]
   # ro: project dir should be read-only (file-read* not file-write*)
-  [[ "$output" == *"Project directory (read-only)"* ]]
+  assert_project_read_only_output "$output" "$TEST_PROJECT"
   # scrub-env active
   [[ "$output" == *"scrub-env active"* ]]
 }
@@ -359,8 +359,8 @@ assert_strict_harness_paths() {
 @test "--trust trusted sets rw (default behavior)" {
   run "$SCODE" --trust trusted --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  # trusted is default mode with rw; profile should contain file-write
-  [[ "$output" == *"file-write"* ]]
+  # trusted is default mode with rw; the project must be mounted writable
+  assert_project_read_write_output "$output" "$TEST_PROJECT"
 }
 
 @test "--trust standard is same as no --trust" {
@@ -387,7 +387,7 @@ assert_strict_harness_paths() {
 @test "explicit --rw overrides --trust untrusted ro" {
   run "$SCODE" --trust untrusted --rw --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  [[ "$output" == *"file-write"* ]]
+  assert_project_read_write_output "$output" "$TEST_PROJECT"
 }
 
 @test "--trust missing argument fails" {
@@ -419,11 +419,11 @@ YAML
   run "$SCODE" --trust untrusted --config "$user_config" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
   # Trust preset should win: strict mode
-  [[ "$output" == *"deny default"* ]]
+  assert_strict_mode_output "$output"
   # Trust preset should win: no network
   [[ "$output" != *"(allow network"* ]]
   # Trust preset should win: read-only project
-  [[ "$output" == *"Project directory (read-only)"* ]]
+  assert_project_read_only_output "$output" "$TEST_PROJECT"
   rm -f "$user_config"
 }
 
@@ -437,8 +437,8 @@ net: off
 YAML
   run "$SCODE" --trust trusted --config "$user_config" --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
-  # trusted should override config strict: profile should use allow-default, not deny-default
-  [[ "$output" == *"(allow default)"* ]]
+  # trusted should override config strict: allow-default, not deny-default
+  assert_non_strict_mode_output "$output"
   # trusted should override config net: off — network should NOT be denied
   [[ "$output" != *"(deny network"* ]]
   rm -f "$user_config"
@@ -453,7 +453,7 @@ YAML
   run "$SCODE" --trust untrusted --dry-run -C "$TEST_PROJECT" -- echo hello
   [ "$status" -eq 0 ]
   # Trust untrusted should still be strict
-  [[ "$output" == *"deny default"* ]]
+  assert_strict_mode_output "$output"
   # Trust untrusted should still deny network
   [[ "$output" != *"(allow network"* ]]
 }

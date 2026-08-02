@@ -332,6 +332,43 @@ _collapse_absolute_path() {
 # Portable realpath: use the system binary when available, otherwise resolve
 # final-component symlinks with readlink and parent components with cd+pwd.
 # Handles files, directories, and non-existent paths.
+# GNU coreutils `stat -f` prints *filesystem* status and exits 0, ignoring the
+# format string. A `stat -f '%i' ... || stat -c '%i' ...` chain therefore never
+# falls through on Linux: it silently returns filesystem data instead of the
+# file's inode. Detect the flavor once and dispatch on named fields so callers
+# cannot reintroduce that bug through mismatched format letters.
+if stat -c '%i' / >/dev/null 2>&1; then
+  readonly SCODE_STAT_FLAVOR="gnu"
+else
+  readonly SCODE_STAT_FLAVOR="bsd"
+fi
+
+# _stat_field <inode|size|owner|owner_links> <path>
+# Prints the requested field, or nothing if it cannot be determined.
+_stat_field() {
+  local field="$1" target="$2" fmt=""
+
+  if [[ "$SCODE_STAT_FLAVOR" == "gnu" ]]; then
+    case "$field" in
+      inode) fmt='%i' ;;
+      size) fmt='%s' ;;
+      owner) fmt='%u' ;;
+      owner_links) fmt='%u:%h' ;;
+      *) return 1 ;;
+    esac
+    stat -Lc "$fmt" "$target" 2>/dev/null || true
+  else
+    case "$field" in
+      inode) fmt='%i' ;;
+      size) fmt='%z' ;;
+      owner) fmt='%u' ;;
+      owner_links) fmt='%u:%l' ;;
+      *) return 1 ;;
+    esac
+    stat -f "$fmt" "$target" 2>/dev/null || true
+  fi
+}
+
 _realpath() {
   local input="$1"
   local resolved=""
@@ -1279,7 +1316,7 @@ parse_config() {
 
   local cfg_size
   if [[ -n "$cfg_fd" ]]; then
-    cfg_size="$(stat -f '%z' "$cfg_input" 2>/dev/null || stat -Lc '%s' "$cfg_input" 2>/dev/null || true)"
+    cfg_size="$(_stat_field size "$cfg_input")"
   else
     cfg_size="$(/usr/bin/wc -c < "${cfg_file}" | tr -d '[:space:]')"
   fi
@@ -3022,9 +3059,9 @@ if [[ -f "${PROJECT_CONFIG_FILE}" ]]; then
     error "failed to open project config: ${PROJECT_CONFIG_FILE}"
     exit 1
   fi
-  _project_cfg_path_identity="$(stat -f '%i' "$PROJECT_CONFIG_FILE" 2>/dev/null || stat -Lc '%i' "$PROJECT_CONFIG_FILE" 2>/dev/null || true)"
-  _project_cfg_fd_identity="$(stat -f '%i' /dev/fd/8 2>/dev/null || stat -Lc '%i' /dev/fd/8 2>/dev/null || true)"
-  _project_cfg_owner_links="$(stat -f '%u:%l' /dev/fd/8 2>/dev/null || stat -Lc '%u:%h' /dev/fd/8 2>/dev/null || true)"
+  _project_cfg_path_identity="$(_stat_field inode "$PROJECT_CONFIG_FILE")"
+  _project_cfg_fd_identity="$(_stat_field inode /dev/fd/8)"
+  _project_cfg_owner_links="$(_stat_field owner_links /dev/fd/8)"
   _project_cfg_canonical="$(_realpath "$PROJECT_CONFIG_FILE")"
   if [[ -z "$_project_cfg_path_identity" || "$_project_cfg_path_identity" != "$_project_cfg_fd_identity" || \
         "$_project_cfg_owner_links" != "${UID}:1" || \

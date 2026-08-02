@@ -133,7 +133,7 @@ load test_helper
   # dry-run with no command should show opencode as default
   run "$SCODE" --dry-run -C "$TEST_PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"# Command: opencode"* ]]
+  assert_dry_run_command "$output" opencode
 }
 
 # ---------- -- separator ----------

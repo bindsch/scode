@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Project configuration (`.scode.yaml`) and the config size limit were rejected
+  on Linux. GNU `stat -f` reports *filesystem* status and exits 0, so the
+  `stat -f … || stat -c …` fallback never fell through and the safety check
+  compared filesystem IDs instead of inodes. Stat access now dispatches on an
+  explicitly detected flavor through `_stat_field`.
+
 ### Changed
 
 - The Homebrew formula now lives only in `bindsch/homebrew-tap`. The in-repo
