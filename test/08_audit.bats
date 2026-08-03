@@ -25,7 +25,7 @@ stop_watch_process() {
 # ---------- Log file ----------
 
 @test "--log creates log file with session header" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/test-session.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
@@ -48,7 +48,7 @@ stop_watch_process() {
 }
 
 @test "--log creates missing parent directories" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/nested/logs/session.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
@@ -168,7 +168,7 @@ stop_watch_process() {
 # ---------- P3: logging stderr capture ----------
 
 @test "--log captures stderr from sandboxed command" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/stderr-test.log"
   # Run a command that writes to stderr
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- bash -c 'echo "scode-stderr-marker" >&2'
@@ -432,7 +432,7 @@ EOF
 # ---------- audit policy-aware ----------
 
 @test "log header includes blocked metadata with --block" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/blocked-meta.log"
   run "$SCODE" --log "$log_file" --block /custom/secrets -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
@@ -958,7 +958,7 @@ EOF
 # ---------- JSON log header ----------
 
 @test "--log produces file starting with #json:" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/json-header.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
@@ -970,7 +970,7 @@ EOF
 }
 
 @test "--log JSON header contains valid JSON" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   require_node
   local log_file="$TEST_PROJECT/json-valid.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
@@ -984,7 +984,7 @@ EOF
 }
 
 @test "--log JSON header has expected fields" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   require_node
   local log_file="$TEST_PROJECT/json-fields.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- true
@@ -1020,7 +1020,7 @@ EOF
 }
 
 @test "--log JSON and legacy headers agree on command" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   require_node
   local log_file="$TEST_PROJECT/json-agree.log"
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- echo hello
@@ -1037,7 +1037,7 @@ EOF
 }
 
 @test "--log JSON blocked array contains --block entries" {
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   require_node
   local log_file="$TEST_PROJECT/json-blocked.log"
   run "$SCODE" --log "$log_file" --block /custom/secrets -C "$TEST_PROJECT" -- true
@@ -1069,7 +1069,7 @@ EOF
   require_node
   # We test json_escape indirectly by creating a log with special characters
   # in the command. The JSON must be parseable by node.
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/json-escape.log"
   # Command with special chars (backslash and double-quote in args)
   run "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- echo 'back\slash' 'quo"te'
@@ -1083,7 +1083,7 @@ EOF
 
 @test "json_escape handles C0 control characters (backspace, form feed, etc.)" {
   require_node
-  require_runtime_sandbox
+  require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/json-escape-c0.log"
   # Create a command containing C0 control chars: backspace (0x08) and form feed (0x0C)
   local bs=$'\x08'

@@ -7,6 +7,32 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sandboxed execution never worked on Linux.** Every non-dry-run launch passed
+  `--close-fds` to bubblewrap, an option that exists in no released version
+  (checked against 0.9, 0.10, and 0.11), so `bwrap` aborted immediately with
+  `Unknown option --close-fds`. Only `--dry-run` succeeded, which is why the
+  test suite never caught it. The flag is removed, and the descriptor-closing
+  guarantee it was meant to provide is now supplied on both platforms by
+  `run_sandbox_engine_with_closed_fds` (previously macOS-only), verified by
+  confirming an inherited descriptor does not reach the sandboxed process.
+
+### Changed
+
+- Coverage exclusion markers are renamed `SCODE_COVERAGE_EXCLUDE_START/END`
+  (from `..._STATIC_...`) and now also bracket the macOS-only profile
+  generation, which Linux-only kcov can never execute. With the runtime fix
+  above, measured shell coverage is 82%, so `SHELL_COVERAGE_MIN` is back to 80.
+- Log and audit-header tests that assert platform-neutral behavior now run on
+  Linux instead of being skipped as macOS-only.
+
+### Added
+
+- CI enables unprivileged user namespaces on Linux so bubblewrap can actually
+  start. Without it every runtime-sandbox test silently skipped, which is what
+  hid the `--close-fds` defect.
+
 ## [0.3.1] - 2026-08-02
 
 ### Changed

@@ -31,6 +31,14 @@ jobs:
       - name: Install system test tools (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bats bubblewrap shellcheck
+      # Ubuntu 24.04 confines unprivileged user namespaces via AppArmor, which
+      # makes bubblewrap unusable and silently skips every runtime-sandbox test.
+      # Allow them so the Linux jobs actually exercise a real sandbox.
+      - name: Allow unprivileged user namespaces
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true && echo "bubblewrap works"
       - run: npm ci
       - run: npm audit --audit-level=low
       - run: make test
@@ -48,6 +56,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: sudo apt-get update && sudo apt-get install -y bats bubblewrap shellcheck
+      # See the test job: without this, bubblewrap cannot start and every
+      # runtime-sandbox test skips, which drags measured coverage down.
+      - name: Allow unprivileged user namespaces
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true && echo "bubblewrap works"
       # Ubuntu 24.04 dropped the kcov package, so build the pinned release from
       # source. Keep KCOV_REF on a tag: the shell coverage gate depends on it.
       - name: Install kcov

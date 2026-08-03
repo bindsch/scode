@@ -59,7 +59,7 @@ CONFIG_FILE_EXPLICIT=0
 # kcov excludes these declarative policy tables because Bash's DEBUG trap does
 # not report individual multiline array entries as executed. Their behavior is
 # covered through the generated-policy and environment-scrubbing tests.
-# SCODE_COVERAGE_STATIC_START
+# SCODE_COVERAGE_EXCLUDE_START
 # Known harnesses (for shortcut detection)
 readonly KNOWN_HARNESSES=(
   opencode claude codex goose gemini droid qwen codemux pi
@@ -147,7 +147,7 @@ DEFAULT_BLOCKED=(
   "$HOME/.psql_history"
   "$HOME/.sqlite_history"
 )
-# SCODE_COVERAGE_STATIC_END
+# SCODE_COVERAGE_EXCLUDE_END
 
 # A caller may intentionally use a synthetic HOME. Keep it functional, while
 # blocking the actual account home wholesale so the override cannot relocate
@@ -156,7 +156,7 @@ if [[ "$ACCOUNT_HOME" != "$HOME" ]]; then
   DEFAULT_BLOCKED+=("$ACCOUNT_HOME")
 fi
 
-# SCODE_COVERAGE_STATIC_START
+# SCODE_COVERAGE_EXCLUDE_START
 # Linux-specific default blocks
 LINUX_EXTRA_BLOCKED=(
   # Browser profiles (saved passwords, cookies, sessions)
@@ -271,7 +271,7 @@ SCRUB_PATTERNS=(
   "GIT_CONFIG_*"
   "GIT_ASKPASS"
 )
-# SCODE_COVERAGE_STATIC_END
+# SCODE_COVERAGE_EXCLUDE_END
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -788,11 +788,16 @@ run_with_stderr_log() {
   return "${rc}"
 }
 
-# sandbox-exec has no close-fds option. Start it through a fixed privileged Bash
-# that closes every inherited descriptor except standard input/output/error,
-# then replaces itself with the engine. The -c program is a trusted constant;
-# all engine/profile/command values remain positional argv entries.
-run_macos_sandbox_engine() {
+# kcov runs only on Linux, so this macOS-only code can never be executed under
+# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
+# it here keeps the percentage honest instead of penalising unreachable lines.
+# Neither sandbox-exec nor bubblewrap can close inherited descriptors for us
+# (bubblewrap has no such option in any released version). Start the engine
+# through a fixed privileged Bash that closes every inherited descriptor except
+# standard input/output/error, then replaces itself with the engine. The -c
+# program is a trusted constant; all engine/profile/command values remain
+# positional argv entries.
+run_sandbox_engine_with_closed_fds() {
   # shellcheck disable=SC2016  # expanded by the fixed inner Bash, not this one
   /usr/bin/env "PATH=${SCODE_CALLER_PATH}" /bin/bash -p -c '
     for fd_path in /dev/fd/[0-9]*; do
@@ -1999,6 +2004,10 @@ audit_watch() {
   done
 }
 
+# kcov runs only on Linux, so this macOS-only code can never be executed under
+# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
+# it here keeps the percentage honest instead of penalising unreachable lines.
+# SCODE_COVERAGE_EXCLUDE_START
 # Seatbelt uses last-match precedence. Reassert custom blocks after broad
 # carve-outs/automatic allows, then restore only authoritative CLI/user child
 # allows. Finally cap the project at read-only when requested.
@@ -2056,7 +2065,12 @@ EOF
 EOF
   fi
 }
+# SCODE_COVERAGE_EXCLUDE_END
 
+# kcov runs only on Linux, so this macOS-only code can never be executed under
+# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
+# it here keeps the percentage honest instead of penalising unreachable lines.
+# SCODE_COVERAGE_EXCLUDE_START
 # Generate macOS sandbox profile (default mode: allow default, deny specific)
 generate_profile() {
   local project_dir="$1"
@@ -2244,7 +2258,12 @@ EOF
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
 }
+# SCODE_COVERAGE_EXCLUDE_END
 
+# kcov runs only on Linux, so this macOS-only code can never be executed under
+# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
+# it here keeps the percentage honest instead of penalising unreachable lines.
+# SCODE_COVERAGE_EXCLUDE_START
 # Generate macOS sandbox profile (strict mode: deny default, allow specific)
 generate_strict_profile() {
   local project_dir="$1"
@@ -2416,6 +2435,7 @@ EOF
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
 }
+# SCODE_COVERAGE_EXCLUDE_END
 
 # Append one fail-closed bubblewrap mask. Directories use an empty tmpfs;
 # existing non-directories (regular files, sockets, FIFOs, devices, and links)
@@ -2504,7 +2524,7 @@ build_bwrap_args() {
   BWRAP_ARGS=()
 
   # Security flags
-  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid --close-fds)
+  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
 
   # System essentials (read-only)
   for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
@@ -2597,7 +2617,7 @@ build_strict_bwrap_args() {
   BWRAP_ARGS=()
 
   # Security flags
-  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid --close-fds)
+  BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
 
   # System essentials only (read-only)
   for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
@@ -3740,13 +3760,13 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     _profile_comments+=("# Sandbox errors below (grep for 'Operation not permitted' / 'Permission denied'):")
     write_log_header_json "${LOG_FILE}" "${_profile_comments[@]}"
     info "logging to ${LOG_FILE}"
-    if run_with_stderr_log "${LOG_FILE}" run_macos_sandbox_engine "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
+    if run_with_stderr_log "${LOG_FILE}" run_sandbox_engine_with_closed_fds "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
     fi
   else
-    if run_macos_sandbox_engine "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
+    if run_sandbox_engine_with_closed_fds "$SANDBOX_ENGINE" -p "${PROFILE}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
@@ -3796,13 +3816,13 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     ensure_log_parent_dir "${LOG_FILE}"
     write_log_header_json "${LOG_FILE}" "# bwrap args: ${BWRAP_ARGS[*]}"
     info "logging to ${LOG_FILE}"
-    if run_with_stderr_log "${LOG_FILE}" /usr/bin/env "PATH=${SCODE_CALLER_PATH}" "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
+    if run_with_stderr_log "${LOG_FILE}" run_sandbox_engine_with_closed_fds "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?
     fi
   else
-    if /usr/bin/env "PATH=${SCODE_CALLER_PATH}" "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
+    if run_sandbox_engine_with_closed_fds "$SANDBOX_ENGINE" "${BWRAP_ARGS[@]}" -- "${COMMAND[@]}"; then
       _scode_rc=0
     else
       _scode_rc=$?

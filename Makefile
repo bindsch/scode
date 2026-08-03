@@ -11,17 +11,14 @@ EXAMPLE_FILES = \
 	examples/sandbox-cloud-eng.yaml \
 	examples/sandbox-grok.yaml
 
-# Shell line-coverage floor for `make coverage`.
+# Shell line-coverage floor for `make coverage`, matching the JavaScript gate.
 #
-# kcov is Linux-only, so a coverage run can never execute the macOS-only halves
-# of this script (SBPL profile generation, run_macos_sandbox_engine). Those
-# branches are still exercised by the full bats suite on the macOS CI job; they
-# just cannot be line-measured. 80% is therefore unreachable on Linux -- the
-# measured figure is ~73%. Raising this back to 80 requires marking the
-# macOS-only regions with SCODE_COVERAGE_STATIC_START/END so they leave the
-# denominator; until then this floor guards against regressions rather than
-# asserting an absolute target. The JavaScript gate below remains at 80%.
-SHELL_COVERAGE_MIN ?= 70
+# kcov is Linux-only, so the macOS-only halves of this script (SBPL profile
+# generation and its helpers) can never be executed under coverage. Those
+# regions are bracketed with SCODE_COVERAGE_EXCLUDE_START/END so they leave the
+# denominator instead of being counted as permanently missed; they are still
+# exercised by the full bats suite on the macOS CI job.
+SHELL_COVERAGE_MIN ?= 80
 
 .PHONY: install uninstall check-prefix test test-js lint coverage release-pins check-pins
 
