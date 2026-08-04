@@ -972,6 +972,7 @@ EOF
 
 @test "preload injects --no-sandbox for time -p wrapper" {
   require_node
+  require_external_binary time
   local val
   val=$(SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');

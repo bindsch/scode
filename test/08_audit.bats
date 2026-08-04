@@ -434,10 +434,15 @@ EOF
 @test "log header includes blocked metadata with --block" {
   require_any_runtime_sandbox
   local log_file="$TEST_PROJECT/blocked-meta.log"
-  run "$SCODE" --log "$log_file" --block /custom/secrets -C "$TEST_PROJECT" -- true
+  # Linux fails closed when a block's parent does not exist, so the blocked
+  # path has to be real for this metadata assertion to run on both platforms.
+  local blocked="$TEST_PROJECT/custom/secrets"
+  mkdir -p "$blocked"
+  blocked="$(cd "$blocked" && pwd -P)"
+  run "$SCODE" --log "$log_file" --block "$blocked" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   # The log must contain the CLI-blocked path with its source
-  run grep '^# blocked: cli /custom/secrets$' "$log_file"
+  run grep -F "# blocked: cli ${blocked}" "$log_file"
   [ "$status" -eq 0 ]
   # Should also contain default-blocked paths
   run grep '^# blocked: default ' "$log_file"
@@ -1040,16 +1045,21 @@ EOF
   require_any_runtime_sandbox
   require_node
   local log_file="$TEST_PROJECT/json-blocked.log"
-  run "$SCODE" --log "$log_file" --block /custom/secrets -C "$TEST_PROJECT" -- true
+  # See above: the blocked path must exist for Linux to accept it.
+  local blocked="$TEST_PROJECT/custom/secrets"
+  mkdir -p "$blocked"
+  blocked="$(cd "$blocked" && pwd -P)"
+  run "$SCODE" --log "$log_file" --block "$blocked" -C "$TEST_PROJECT" -- true
   [ "$status" -eq 0 ]
   local json_line
   json_line="$(head -1 "$log_file" | sed 's/^#json://')"
-  # Check that /custom/secrets appears in the blocked array with source "cli"
+  # The blocked path must appear in the blocked array with source "cli"
   run node -e "
     const d = JSON.parse(process.argv[1]);
-    const found = d.blocked.some(b => b.path === '/custom/secrets' && b.source === 'cli');
+    const want = process.argv[2];
+    const found = d.blocked.some(b => b.path === want && b.source === 'cli');
     if (!found) throw new Error('cli block not found in JSON: ' + JSON.stringify(d.blocked));
-  " "$json_line"
+  " "$json_line" "$blocked"
   [ "$status" -eq 0 ]
 }
 

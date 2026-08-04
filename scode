@@ -745,7 +745,12 @@ run_with_stderr_log() {
   # write_log_header_json opened fd 9 on the same temporary inode before
   # installing it at log_file. Stream through that descriptor so a sandboxed
   # command cannot redirect logging by replacing the path.
-  tee /dev/fd/9 < "${stderr_pipe}" >&2 &
+  #
+  # -a is required, not cosmetic: on Linux /dev/fd/9 is a /proc symlink to the
+  # log file, so tee's default open truncates the header that was just written.
+  # On macOS /dev/fd/9 duplicates the descriptor and never truncated, which is
+  # why the missing flag only ever corrupted Linux logs.
+  tee -a /dev/fd/9 < "${stderr_pipe}" >&2 &
   local tee_pid=$!
 
   local rc=0

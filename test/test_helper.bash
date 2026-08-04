@@ -37,6 +37,18 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || skip "$1 not installed"
 }
 
+# Like require_command, but ignores shell builtins and keywords. `time` is a
+# Bash keyword, so `command -v time` succeeds even where /usr/bin/time is not
+# installed -- and the preload can only rewrite a real executable.
+require_external_binary() {
+  local name="$1" dir
+  local IFS=:
+  for dir in $PATH; do
+    [[ -x "${dir}/${name}" ]] && return 0
+  done
+  skip "${name} binary not installed"
+}
+
 # bubblewrap can be installed yet unusable: Ubuntu 24.04 confines unprivileged
 # user namespaces through AppArmor, and most containers block them outright.
 # Probe an actual sandbox rather than trusting that the binary exists.
