@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-08-04
+
 ### Fixed
 
 - **Sandboxed execution never worked on Linux.** Every non-dry-run launch passed

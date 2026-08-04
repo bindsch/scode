@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.3.1"
+readonly PROGRAM_VERSION="0.3.2"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"

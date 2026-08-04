@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.3.1).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
+> **Beta software (v0.3.2).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
 scode wraps AI coding tools (Claude, Codex, Aider, Grok, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
