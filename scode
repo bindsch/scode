@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.3.2"
+readonly PROGRAM_VERSION="0.3.3"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -746,11 +746,13 @@ run_with_stderr_log() {
   # installing it at log_file. Stream through that descriptor so a sandboxed
   # command cannot redirect logging by replacing the path.
   #
-  # -a is required, not cosmetic: on Linux /dev/fd/9 is a /proc symlink to the
-  # log file, so tee's default open truncates the header that was just written.
-  # On macOS /dev/fd/9 duplicates the descriptor and never truncated, which is
-  # why the missing flag only ever corrupted Linux logs.
-  tee -a /dev/fd/9 < "${stderr_pipe}" >&2 &
+  # The log is written through fd 9 itself (tee's stdout), never through a path.
+  # On Linux /dev/fd/N is a /proc symlink, so naming /dev/fd/9 as a tee *file*
+  # would re-resolve the log path on every run -- which both truncated the
+  # header and reopened the symlink-replacement race this descriptor exists to
+  # close. Only the stderr copy is addressed by path, and stderr already belongs
+  # to the caller; -a keeps that copy from truncating a redirected stderr file.
+  tee -a /dev/fd/2 < "${stderr_pipe}" >&9 &
   local tee_pid=$!
 
   local rc=0

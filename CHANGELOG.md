@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-08-13
+
+### Fixed
+
+- The audit log is now written through file descriptor 9 itself rather than
+  through `/dev/fd/9` as a `tee` file argument. On Linux that path is a `/proc`
+  symlink, so naming it re-resolved the log path on every run -- reopening the
+  symlink-replacement race the descriptor exists to close, and (before 0.3.2)
+  truncating the header. Only the stderr copy is addressed by path now, and
+  stderr already belongs to the caller.
+
 ## [0.3.2] - 2026-08-04
 
 ### Fixed
