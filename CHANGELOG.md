@@ -7,6 +7,23 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- **Strict mode permanently destroyed OAuth logins.** The harness state
+  auto-allow was read-only, which does not prevent a token exchange, only the
+  recording of its result: the harness reads a valid refresh token, the
+  provider rotates and invalidates it, and the replacement cannot be written
+  back. One strict-mode run was therefore enough to break `codex login` for
+  good, with no error at the time it happened, reported later as
+  `refresh_token_reused`. Harness state directories are now bound read-write on
+  both platforms. The grant stays confined to the harness's own directory;
+  unrelated credential stores remain blocked.
+- Harness detection now ignores a trailing `.exe` on the resolved binary.
+  Claude Code installs as `/opt/homebrew/bin/claude` symlinked to
+  `.../bin/claude.exe`, so any caller that resolves symlinks handed scode a
+  name no entry matched. The harness lost its state auto-allow, which surfaced
+  as the harness reporting that it was not logged in.
+
 ## [0.3.3] - 2026-08-13
 
 ### Fixed

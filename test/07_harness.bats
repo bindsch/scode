@@ -172,8 +172,10 @@ load test_helper
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- claude
   [ "$status" -eq 0 ]
-  # Harness state is visible but immutable in strict mode.
-  [[ "$output" == *"Harness auto-allowed directories (read-only)"* ]]
+  # Harness state is writable: an OAuth harness must persist rotated
+  # credentials, and read-only state destroys the login on first refresh.
+  [[ "$output" == *"Harness auto-allowed state directories (read-write)"* ]]
+  [[ "$output" == *"(allow file-read* file-write*"* ]]
   [[ "$output" == *"(subpath \"$HOME/.claude\")"* ]]
 }
 
@@ -608,4 +610,24 @@ YAML
   run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- bash -c "A=1 B=2 claude"
   [ "$status" -eq 0 ]
   [[ "$output" == *"strict+claude"* ]]
+}
+
+@test "strict harness state is writable so credential rotation can persist" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- codex
+  [ "$status" -eq 0 ]
+  # Read-only state does not prevent the token exchange, it only discards the
+  # replacement, which permanently breaks the login. Regression guard.
+  [[ "$output" != *"Harness auto-allowed directories (read-only)"* ]]
+  [[ "$output" == *"(allow file-read* file-write*"* ]]
+  [[ "$output" == *"(subpath \"$HOME/.codex\")"* ]]
+}
+
+@test "writable harness state does not reopen unrelated credential stores" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- codex
+  [ "$status" -eq 0 ]
+  # The grant is confined to the harness's own directory.
+  [[ "$output" != *"file-write*"*"$HOME/.ssh"* ]]
+  [[ "$output" != *"(subpath \"$HOME/.aws\")"* ]]
 }

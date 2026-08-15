@@ -627,8 +627,10 @@ Examples:
   scode audit session.log            # parse denials, suggest --allow flags
 
 Strict Mode Auto-Allow:
-  When --strict detects a known harness, it automatically allows read-only access to:
+  When --strict detects a known harness, it automatically allows read-write access to:
     - The harness config/state paths (e.g. ~/.claude for claude)
+  Write access is required: OAuth harnesses rotate credentials and must persist
+  the replacement, or the login is destroyed the first time the token expires.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
   --trust untrusted disables harness-state auto-allows entirely.
 
@@ -820,6 +822,12 @@ run_sandbox_engine_with_closed_fds() {
 # Check if arg is a known harness
 is_known_harness() {
   local cmd="${1##*/}"
+  # npm-installed harnesses can ship a .exe launcher even on POSIX: Claude Code
+  # resolves through /opt/homebrew/bin/claude to .../bin/claude.exe. Callers
+  # that resolve symlinks therefore hand us a name no entry matches, and the
+  # harness loses its state auto-allow, which shows up as the harness reporting
+  # that it is not logged in.
+  cmd="${cmd%.exe}"
   for h in "${KNOWN_HARNESSES[@]}"; do
     [[ "$cmd" == "$h" ]] && return 0
   done
@@ -2423,16 +2431,23 @@ EOF
     done
   fi
 
-  # Reserved for narrowly scoped harness read-only directories.
+  # Narrowly scoped harness state directories.
+  #
+  # These are read-write, not read-only. A harness that signs in with OAuth
+  # must persist rotated credentials: the provider invalidates the old refresh
+  # token the moment it is redeemed, so a harness that can read its token but
+  # not write the replacement destroys the login permanently, and silently.
+  # Read-only here does not prevent that exchange, it only discards the result.
+  # The grant stays confined to the harness's own state directory.
   if [[ ${HARNESS_STRICT_RO[0]+_} ]]; then
     echo ""
-    echo "; Harness auto-allowed directories (read-only)"
+    echo "; Harness auto-allowed state directories (read-write)"
     for dir in "${HARNESS_STRICT_RO[@]}"; do
       if [[ -n "$dir" ]]; then
         local esc_dir
         esc_dir="$(sbpl_escape "$dir")"
         cat <<EOF
-(allow file-read*
+(allow file-read* file-write*
   (subpath "${esc_dir}")
 )
 EOF
@@ -2669,11 +2684,12 @@ build_strict_bwrap_args() {
     done
   fi
 
-  # Harness strict read-only directories
+  # Harness state directories, bound read-write so credential rotation can
+  # persist. See the macOS emission for why read-only breaks OAuth harnesses.
   if [[ ${HARNESS_STRICT_RO[0]+_} ]]; then
     for dir in "${HARNESS_STRICT_RO[@]}"; do
       if [[ -n "$dir" && -e "$dir" ]]; then
-        BWRAP_ARGS+=(--ro-bind "$dir" "$dir")
+        BWRAP_ARGS+=(--bind "$dir" "$dir")
       fi
     done
   fi
