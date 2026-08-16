@@ -554,6 +554,10 @@ Options:
   --trust LEVEL       Named trust preset: trusted, standard, untrusted (singleton)
   --config FILE       Use FILE as config (default: ~/.config/scode/sandbox.yaml; singleton)
   --scrub-env         Scrub sensitive env vars (API keys, tokens) before exec
+  --no-credential-sync
+                      Do not copy Claude Code's Keychain credential to
+                      ~/.claude/.credentials.json (sandboxed claude cannot
+                      then authenticate; macOS only)
   --log FILE          Log sandbox violations to FILE (creates parent dirs; singleton)
   --dry-run           Print sandbox profile/command without executing
 
@@ -619,7 +623,7 @@ Examples:
   scode --ro claude                  # read-only sandbox
   scode --allow ~/Documents claude   # unblock ~/Documents
   scode -n claude                    # no network access
-  scode --strict claude              # deny-default; ~/.claude is read-only
+  scode --strict claude              # deny-default; ~/.claude stays read-write
   scode --trust untrusted claude     # maximum lockdown; no harness-state auto-allow
   scode --trust trusted claude       # minimal sandbox (rw, net on)
   scode --scrub-env claude           # scrub API keys from env
@@ -2733,6 +2737,7 @@ DRY_RUN=0
 STRICT=0
 SCRUB_ENV=0
 GROK_DEFENSE=0
+CREDENTIAL_SYNC=1
 LOG_FILE=""
 PROJECT_DIR=""
 
@@ -2832,6 +2837,10 @@ while [[ $# -gt 0 ]]; do
       CONFIG_FILE_EXPLICIT=1
       CLI_CONFIG_SEEN=1
       shift 2
+      ;;
+    --no-credential-sync)
+      CREDENTIAL_SYNC=0
+      shift
       ;;
     --scrub-env)
       SCRUB_ENV=1
@@ -3059,6 +3068,171 @@ if DETECTED_HARNESS="$(detect_harness)"; then
 else
   warning "'${COMMAND[0]}' is not a known harness — sandbox behavior has not been tested for this command"
 fi
+
+# Claude Code keeps its credential in the macOS Keychain, which the sandbox
+# blocks along with the rest of ~/Library, so a sandboxed claude reports
+# "Not logged in" against a perfectly valid session. It also reads a file store
+# at ~/.claude/.credentials.json, inside the directory the harness auto-allow
+# already covers.
+#
+# Copying the credential there by hand does not hold: a token refresh migrates
+# it back to the Keychain and deletes the file. So the copy is made here, in the
+# parent process, which is still outside the sandbox and can read the Keychain.
+#
+# This puts the refresh token in a file the sandboxed agent can read, which is
+# the same exposure every other harness already has for ~/.codex and the rest,
+# and is what running a harness sandboxed costs. --no-credential-sync declines
+# it; sandboxed claude then cannot authenticate.
+sync_claude_credential() {
+  [[ "$PLATFORM" == "darwin" ]] || return 0
+  # Homebrew's claude resolves through a symlink to claude.exe, so the detected
+  # name carries the suffix that is_known_harness already strips.
+  [[ "${DETECTED_HARNESS%.exe}" == "claude" ]] || return 0
+  [[ "$CREDENTIAL_SYNC" -eq 1 ]] || return 0
+  command -v security >/dev/null 2>&1 || return 0
+
+  # Only write the credential where a sandboxed process could actually use it.
+  # Everywhere else the copy is pure secrecy loss: it moves the refresh token
+  # out of the Keychain, where per-binary ACLs guard it, into a file any process
+  # running as this user can read, and buys nothing back.
+  #
+  # --dry-run promises to inspect without acting. --trust untrusted drops the
+  # harness auto-allow, so the sandbox cannot read ~/.claude at all. And
+  # blocking ~/.claude is a direct instruction to keep the credential away from
+  # this run, which writing it there first would contradict.
+  [[ "$DRY_RUN" -eq 1 ]] && return 0
+  [[ "$CLI_TRUST" == "untrusted" ]] && return 0
+  # Only a direct invocation is inspectable. Behind a wrapper -- env, nice,
+  # timeout -- the binary scode resolved is the wrapper, and the harness it
+  # finally executes is chosen by a PATH the wrapper sets, which is how
+  # `env PATH=$PWD:$PATH claude` passed the check below as /usr/bin/env and
+  # then ran a repository-controlled claude with the token in reach.
+  if [[ "$(basename "${COMMAND_BINARY_PATH:-}")" != "${DETECTED_HARNESS}" ]]; then
+    warning "not syncing the Claude credential: '${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
+    return 0
+  fi
+
+  # A binary inside the project is not the installed harness. A repository can
+  # ship its own ./claude, or a node_modules/.bin/claude, and PATH may well find
+  # it first; copying the real OAuth token for that is handing a credential to
+  # whatever the project chose to call itself. The harness auto-allow tolerates
+  # a basename match because it only opens a directory; this writes a secret.
+  local resolved="${COMMAND_BINARY_PATH:-}"
+  if [[ -n "$resolved" && -n "${PROJECT_DIR:-}" ]]; then
+    case "$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)/" in
+      "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"/*)
+        warning "not syncing the Claude credential: '${resolved}' lives inside the project"
+        return 0
+        ;;
+    esac
+  fi
+
+  # An explicit --allow re-opens a blocked path, so a block alone does not mean
+  # the sandbox cannot reach the credential; consult the effective policy first.
+  local _explicitly_allowed=0
+  local _allowed_path
+  for _allowed_path in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+    case "$HOME/.claude/" in
+      "$_allowed_path"/*|"$_allowed_path") _explicitly_allowed=1; break ;;
+    esac
+  done
+
+  # Both the directory and the credential file itself, since blocking just the
+  # file is a direct instruction not to expose it.
+  if [[ "$_explicitly_allowed" -eq 0 ]]; then
+    if is_allowed_in_list "$HOME/.claude/.credentials.json" \
+         "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
+         "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
+         "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
+      return 0
+    fi
+    if is_allowed_in_list "$HOME/.claude" \
+         "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
+         "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
+         "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
+      return 0
+    fi
+  fi
+
+  # Declared separately: within one `local`, $dir is not yet assigned when a
+  # later name on the same line expands it, which trips set -u.
+  local dir="$HOME/.claude"
+  local target="$dir/.credentials.json"
+  local tmp=""
+  [[ -d "$dir" ]] || return 0
+
+  # Resolve where the write would actually land. HOME can be redirected and
+  # ~/.claude can be a symlink, either of which would put the real refresh
+  # token inside the repository being reviewed.
+  local real_dir
+  real_dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
+  if [[ -n "${PROJECT_DIR:-}" ]]; then
+    local real_project
+    real_project="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" || real_project=""
+    if [[ -n "$real_project" ]]; then
+      case "$real_dir/" in
+        "$real_project"/*)
+          warning "not syncing the Claude credential: ${real_dir} is inside the project"
+          return 0
+          ;;
+      esac
+    fi
+  fi
+
+  local secret
+  secret="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)" || return 0
+  [[ -n "$secret" ]] || return 0
+
+  # Only the tokens matter; anything else means the item is not a credential we
+  # can hand to the harness, and writing it would replace a working file.
+  # The system interpreter by name, not $PYTHON_BIN: this one is fed the
+  # credential on stdin, and an inherited variable should not choose what reads
+  # it. macOS always ships /usr/bin/python3.
+  printf '%s' "$secret" | /usr/bin/python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin).get("claudeAiOauth") or {}
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if d.get("accessToken") and d.get("refreshToken") else 1)
+' 2>/dev/null || return 0
+
+  # The Keychain is not always the newer copy. A refresh that happens inside the
+  # sandbox writes the file and cannot write the Keychain, so copying
+  # unconditionally would replace a live credential with a spent one -- and
+  # since the provider invalidates the old refresh token when it issues a
+  # replacement, that destroys the only working login. Whichever expires later
+  # is the newer one, and it stays.
+  if [[ -s "$target" ]]; then
+    if /usr/bin/python3 -c '
+import json, sys
+def expiry(path):
+    try:
+        with open(path) as handle:
+            return int((json.load(handle).get("claudeAiOauth") or {}).get("expiresAt") or 0)
+    except (OSError, ValueError, TypeError):
+        return -1
+current = expiry(sys.argv[1])
+incoming = int((json.loads(sys.stdin.read()).get("claudeAiOauth") or {}).get("expiresAt") or 0)
+raise SystemExit(0 if current >= incoming else 1)
+' "$target" <<< "$secret" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  # Written under a random name and renamed, so a concurrent reader sees either
+  # the old credential or the new one, never a partial file.
+  tmp="$(mktemp "$dir/.credentials.XXXXXX" 2>/dev/null)" || return 0
+  chmod 600 "$tmp" 2>/dev/null || true
+  # A failure here is worth saying out loud: the harness will start and then
+  # report itself logged out, which looks like an expired session rather than a
+  # sandbox that could not hand over the credential.
+  if printf '%s' "$secret" > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
+    return 0
+  fi
+  rm -f "$tmp" 2>/dev/null || true
+  warning "could not write ${target}; sandboxed claude will not be able to authenticate"
+}
 
 # -------- Resolve config file --------
 
@@ -3768,6 +3942,10 @@ if [[ "$PLATFORM" == "darwin" ]]; then
 
   # Set working directory (sandbox-exec has no --chdir equivalent)
   cd "${PROJECT_DIR}" || { error "cannot cd to project directory: ${PROJECT_DIR}"; exit 1; }
+
+  # Resolved policy is known by now, so the sync can tell whether the sandbox
+  # this run builds could actually reach the credential.
+  sync_claude_credential
 
   # Run sandboxed (use -p to pass profile as string — avoids temp file cleanup
   # issues since exec replaces the shell and bypasses EXIT traps).

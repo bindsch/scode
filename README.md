@@ -159,7 +159,7 @@ scode -- npm test                  # run any command in sandbox
 scode --ro opencode                # read-only project directory
 scode --allow ~/Documents claude   # unblock a default-blocked dir
 scode -n goose                     # no network access
-scode --strict claude              # deny-default; reads ~/.claude but cannot modify it
+scode --strict claude              # deny-default; ~/.claude stays readable and writable
 scode --trust untrusted codex      # maximum lockdown; no harness-state auto-allow
 scode --trust trusted gemini       # minimal sandbox (rw, net on)
 scode --scrub-env claude           # strip API keys from env
@@ -173,7 +173,7 @@ scode --config examples/sandbox-grok.yaml grok  # Grok collection defense
 ### Known harnesses
 
 These commands are recognized without needing `--`. In strict mode, scode also
-auto-allows their default user config and state paths **read-only**. The
+auto-allows their default user config and state paths **read-write**. The
 `untrusted` preset disables these automatic openings entirely.
 
 | Harness | Command | Default auto-allowed paths |
@@ -251,11 +251,11 @@ scode --trust untrusted --block ~/Company-Secrets codex
 
 Use Linux equivalents where paths differ.
 
-**Harness auto-allow:** When `--strict` detects a known harness as the command binary (or behind transparent wrappers such as `env`, `nice`, `timeout`, `command`, `stdbuf`, `ionice`, `taskset`, or shell `-c` wrappers), it automatically allows read-only access to:
+**Harness auto-allow:** When `--strict` detects a known harness as the command binary (or behind transparent wrappers such as `env`, `nice`, `timeout`, `command`, `stdbuf`, `ionice`, `taskset`, or shell `-c` wrappers), it automatically allows read-write access to:
 
 - The harness config and state paths listed above
 
-This means `scode --strict claude` can read `~/.claude` but cannot modify it. It does not reopen browser profiles, Keychains, or broad macOS `~/Library` subtrees. `scode --trust untrusted claude` does not expose `~/.claude` at all unless the caller explicitly uses `--allow`.
+This means `scode --strict claude` can both read and update `~/.claude`, which it must: the harness rewrites its own credential when the provider rotates the refresh token, and a harness that cannot write the replacement destroys its login on first refresh. It does not reopen browser profiles, Keychains, or broad macOS `~/Library` subtrees. `scode --trust untrusted claude` does not expose `~/.claude` at all unless the caller explicitly uses `--allow`.
 
 Detection is conservative: only the command binary (or the binary behind supported transparent wrappers) triggers auto-allow. Harness names appearing as arguments do not — `scode --strict -- echo claude` does not auto-allow `~/.claude`.
 
@@ -518,10 +518,61 @@ For Claude Code with Playwright, create `.mcp.json` in your project root:
 
 **macOS** — uses the system `/usr/bin/sandbox-exec`. `~/Library` is blocked without automatic credential-bearing carve-outs. `sandbox-exec` is deprecated; scode checks that the system binary exists and the runtime tests probe it before relying on it.
 
+### macOS Keychain and Claude Code
+
+Blocking `~/Library` also blocks the Keychain, which is where Claude Code stores
+its subscription credential on macOS. A sandboxed `claude` therefore reports
+`Not logged in` against a session that is perfectly valid outside the sandbox.
+
+Claude Code also reads a file store at `~/.claude/.credentials.json`, holding the
+same JSON, and `~/.claude` is inside the directory the harness auto-allow already
+covers. scode copies the credential there automatically before launching
+`claude`, from the parent process, which is still outside the sandbox and can
+read the Keychain. Nothing needs to be set up, and no API key is involved: the
+existing subscription login is what gets used.
+
+Doing this by hand does not work, which is why scode does it every launch. The
+Keychain remains Claude Code's primary store, and a token refresh writes the
+credential back there and **deletes the file**, so a copy made once is gone the
+first time the token rotates. Deleting the Keychain item to force file-only
+storage does not help either: the next refresh recreates it and removes the file
+again. The copy has to be remade at each launch, which is what scode does.
+
+**This trades credential secrecy for sandboxed operation, and the trade is what
+running a harness sandboxed costs.** In the Keychain the refresh token is
+unreachable inside the sandbox and ACL-gated outside it. In `~/.claude` it sits
+in a directory the sandbox grants read-write, and `sandbox-exec` cannot
+distinguish the harness from the processes it spawns, so anything the model runs
+can read the token, with the network reachable by default.
+
+This is not a new exposure so much as an explicit one: the same auto-allow
+already covers `~/.codex`, `~/.gemini`, and every other harness state directory,
+each holding that harness's credential, for the same reason — they all rotate
+refresh tokens and must be able to write the replacement. A harness you run
+sandboxed can always read its own credential. What changes here is that Claude
+Code stops being the exception that Keychain storage made it.
+
+The copy never replaces a newer credential with an older one. A refresh that
+happens inside the sandbox writes the file and cannot write the Keychain, so
+copying unconditionally would overwrite a live token with a spent one -- and
+because the provider invalidates the old refresh token when it issues a
+replacement, that would destroy the only working login. Whichever expires later
+stays.
+
+Decline the copy with `--no-credential-sync`; sandboxed `claude` then cannot
+authenticate. It is also refused when the harness runs behind a wrapper such as
+`env`, whose final binary scode cannot inspect, and for a `claude` binary inside
+the project, since a repository can ship its own and PATH may find it first -- opening a directory
+to a basename match is one thing, handing it a credential is another. The copy
+is likewise skipped wherever the sandbox could not use it anyway — under `--dry-run`, under `--trust untrusted`, which drops the harness
+auto-allow, and when `--block` puts `~/.claude` or the credential file itself out of reach — since
+writing it on those paths would cost secrecy and buy nothing. Treat a sandboxed harness as something that
+holds its own login, not as something that cannot reach it.
+
 **Linux** — uses `bubblewrap` (install separately). Home dir is bound; blocked dirs are overlaid with tmpfs. Tested on Debian/Ubuntu; other distros may work but are not guaranteed.
 
 **Both platforms:**
-- **Strict mode** — deny-default, allow essentials (`/usr`, `/opt`, system dirs). Auto-allows only read-only access to the detected harness's listed config/state paths. `--trust untrusted` disables that auto-allow.
+- **Strict mode** — deny-default, allow essentials (`/usr`, `/opt`, system dirs). Auto-allows read-write access to the detected harness's listed config/state paths. `--trust untrusted` disables that auto-allow. The access is read-write because these directories hold rotating OAuth credentials: the provider invalidates the old refresh token the moment it issues a replacement, so a harness that can read its credential but not write the new one destroys its own login on first use.
 - **`--block` under project dir** — if the project dir sits under a blocked parent, the project-dir override re-allows the project subtree so work can proceed. `--block` entries inside the project are then re-applied, so blocking project subdirectories still works.
 
 ## Tips

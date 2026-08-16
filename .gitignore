@@ -7,3 +7,5 @@
 node_modules/
 coverage/
 .claude/settings.local.json
+/.hookrun/
+/.hookrun-install.lock
