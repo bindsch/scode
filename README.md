@@ -288,7 +288,29 @@ Optional config file at `~/.config/scode/sandbox.yaml`. Entries are merged with 
 
 - `blocked:` adds to the default blocked list
 - `allowed:` overrides blocks recursively (the path and all descendants), including defaults and your additions
+- `filesystem:` glob pattern rules (macOS only) — see below
 - Scalar options (`net`, `fs_mode`, `strict`, `scrub_env`, `grok_defense`) set defaults
+
+### Filesystem pattern rules (macOS only)
+
+`filesystem:` maps quoted glob patterns to access modes. Rules are emitted
+after all allow rules (an `--allow` cannot reopen them) but before the
+read-only cap, so `fs_mode: ro` still denies writes everywhere. Later rules
+may narrow earlier ones.
+
+```yaml
+filesystem:
+  "~/**/.env": none        # deny reads+writes to any .env under home
+  "~/**/.envrc": none
+  "~/src/**/build": write  # read-write carve-out
+```
+
+Modes: `none` (deny all access), `read` (read-only), `write` (read-write).
+Glob syntax: `**` matches across path segments (including `/`); `*` and `?`
+match within a single segment. `~` prefixes expand to `$HOME`; relative
+patterns anchor to the project directory. In project config (`.scode.yaml`)
+only `none` rules are honored (untrusted input cannot grant access). On
+Linux the section is ignored with a warning.
 
 ### Project config
 
@@ -320,6 +342,11 @@ blocked:
 # Allow specific directories, overriding defaults
 allowed:
   - ~/Documents/projects
+
+# Filesystem pattern rules (macOS only)
+filesystem:
+  "~/**/.env": none
+  "~/**/.envrc": none
 ```
 
 | Config key | Values | Equivalent CLI flag |

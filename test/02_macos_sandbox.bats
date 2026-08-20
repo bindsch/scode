@@ -747,3 +747,160 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" != *"SHOULD_NOT_PRINT"* ]]
 }
+
+# ---------- Filesystem pattern rules (filesystem: config section) ----------
+
+@test "filesystem: none rule emits deny after allows, before ro cap" {
+  local config_file="$TEST_PROJECT/fs-rules.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  "~/**/.env": none
+  "~/**/.envrc": none
+YAML
+  run "$SCODE" --dry-run --config "$config_file" --ro -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  grep -qF '; Filesystem pattern rules' <<<"$output"
+  grep -qF '(deny file-read* file-write* process-exec' <<<"$output"
+  grep -qF "regex #\"^$HOME/.*\\.env\$\"" <<<"$output"
+  grep -qF "regex #\"^$HOME/.*\\.envrc\$\"" <<<"$output"
+  local fs_pos ro_pos
+  fs_pos=$(grep -nF '; Filesystem pattern rules' <<<"$output" | cut -d: -f1)
+  ro_pos=$(grep -nF '; Final read-only project invariant' <<<"$output" | cut -d: -f1)
+  [ -n "$fs_pos" ]
+  [ -n "$ro_pos" ]
+  [ "$fs_pos" -lt "$ro_pos" ]
+}
+
+@test "filesystem: read and write modes emit correct rules" {
+  local config_file="$TEST_PROJECT/fs-rules-modes.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  "cache": read
+  "build": write
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  # read mode: allow reads, deny writes
+  grep -qF '(allow file-read* process-exec' <<<"$output"
+  grep -qF '(deny file-write*' <<<"$output"
+  grep -qF '/cache$"' <<<"$output"
+  # write mode: allow read-write
+  grep -qF '(allow file-read* file-write*' <<<"$output"
+  grep -qF '/build$"' <<<"$output"
+}
+
+@test "filesystem: later rule narrows earlier rule (order preserved)" {
+  local config_file="$TEST_PROJECT/fs-rules-order.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  "~/**/.env": none
+  "~/keep/.env": write
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local deny_pos allow_pos
+  deny_pos=$(grep -nF "regex #\"^$HOME/.*\\.env\$\"" <<<"$output" | cut -d: -f1)
+  allow_pos=$(grep -nF "regex #\"^$HOME/keep/\\.env\$\"" <<<"$output" | cut -d: -f1)
+  [ -n "$deny_pos" ]
+  [ -n "$allow_pos" ]
+  [ "$deny_pos" -lt "$allow_pos" ]
+}
+
+@test "filesystem: invalid mode is rejected" {
+  local config_file="$TEST_PROJECT/fs-rules-bad-mode.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  "~/**/.env": sometimes
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"expected 'none', 'read', or 'write'"* ]]
+}
+
+@test "filesystem: unsupported pattern characters are rejected" {
+  local config_file="$TEST_PROJECT/fs-rules-bad-pattern.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  "~/**/.env[rc]": none
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported filesystem rule pattern"* ]]
+}
+
+@test "filesystem: project config may only deny" {
+  local proj
+  proj="$(mktemp -d)"
+  cat > "$proj/.scode.yaml" <<YAML
+filesystem:
+  "secret": none
+  "writable": write
+YAML
+  run "$SCODE" --dry-run -C "$proj" -- true
+  [ "$status" -eq 0 ]
+  grep -qF '/secret$"' <<<"$output"
+  ! grep -qF '/writable$"' <<<"$output"
+  [[ "$output" == *"restrictive-only"* ]]
+  rm -rf "$proj"
+}
+
+@test "filesystem: log header records fsrule metadata" {
+  require_runtime_sandbox
+  local proj log_file
+  proj="$(mktemp -d)"
+  echo "s3cret" > "$proj/.envrc"
+  cat > "$proj/.scode.yaml" <<YAML
+filesystem:
+  "**/.envrc": none
+YAML
+  log_file="$proj/scode.log"
+  run "$SCODE" --log "$log_file" -C "$proj" -- cat .envrc
+  [ "$status" -ne 0 ]
+  [ -f "$log_file" ]
+  grep -q '# fsrule: project .*\*\*/.envrc -> none' "$log_file"
+  grep -qF '"fsrules":[{"mode":"none","regex":"' "$log_file"
+  rm -rf "$proj"
+}
+
+@test "macOS runtime: filesystem none rule denies nested .envrc reads" {
+  require_runtime_sandbox
+  local config_file="$TEST_PROJECT/fs-rules-runtime.yaml"
+  mkdir -p "$TEST_PROJECT/fs-nested"
+  echo "dotenv-secret" > "$TEST_PROJECT/fs-nested/.envrc"
+  cat > "$config_file" <<YAML
+filesystem:
+  "**/.envrc": none
+YAML
+  run "$SCODE" --config "$config_file" -C "$TEST_PROJECT" -- cat "$TEST_PROJECT/fs-nested/.envrc"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"dotenv-secret"* ]]
+}
+
+@test "macOS runtime: filesystem write rule allows writes in carve-out" {
+  require_runtime_sandbox
+  local config_file="$TEST_PROJECT/fs-rules-rw.yaml"
+  mkdir -p "$TEST_PROJECT/fs-build"
+  cat > "$config_file" <<YAML
+filesystem:
+  "fs-build": write
+YAML
+  run "$SCODE" --config "$config_file" -C "$TEST_PROJECT" -- sh -c "echo ok > $TEST_PROJECT/fs-build/out.txt"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_PROJECT/fs-build/out.txt" ]
+  [[ "$(cat "$TEST_PROJECT/fs-build/out.txt")" == "ok" ]]
+}
+
+@test "macOS runtime: filesystem none rule blocks read even with --allow" {
+  require_runtime_sandbox
+  local config_file="$TEST_PROJECT/fs-rules-allow.yaml"
+  mkdir -p "$TEST_PROJECT/fs-allowdir"
+  echo "keep" > "$TEST_PROJECT/fs-allowdir/.env"
+  cat > "$config_file" <<YAML
+filesystem:
+  "**/.env": none
+YAML
+  # --allow cannot reopen a filesystem rule; the .env deny must still win
+  run "$SCODE" --config "$config_file" --allow "$TEST_PROJECT/fs-allowdir" -C "$TEST_PROJECT" -- cat "$TEST_PROJECT/fs-allowdir/.env"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"keep"* ]]
+}

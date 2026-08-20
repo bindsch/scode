@@ -31,6 +31,15 @@
 # scrub_env: true      # strip API keys from env (same as --scrub-env)
 # grok_defense: true   # harden Grok collection and project-secret access
 
+# Filesystem pattern rules (macOS only)
+# Quoted glob -> mode. Modes: none (deny all), read (read-only), write (read-write).
+# ** matches across path segments; * and ? match within one segment.
+# Relative patterns anchor to the project directory. Rules apply after allow
+# rules (a floor --allow cannot reopen) and before the read-only cap.
+# filesystem:
+#   "~/**/.env": none
+#   "~/**/.envrc": none
+
 # Block additional directories beyond defaults
 # Note: inline comments (space + #) are stripped from unquoted values.
 # Paths containing literal " #" should be quoted: - "~/path with # in name"

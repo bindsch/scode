@@ -1159,3 +1159,27 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" == *"grok_defense conflicts with allowed path"* ]]
 }
+
+# ---------- Filesystem pattern rules ----------
+
+@test "filesystem section requires quoted pattern keys" {
+  local config_file="$TEST_PROJECT/fs-unquoted.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  ~/**/.env: none
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"quoted \"pattern\": mode mappings"* ]]
+}
+
+@test "filesystem section rejects list syntax" {
+  local config_file="$TEST_PROJECT/fs-list.yaml"
+  cat > "$config_file" <<YAML
+filesystem:
+  - "~/**/.env" = "none"
+YAML
+  run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"quoted \"pattern\": mode mappings"* ]]
+}

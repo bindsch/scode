@@ -593,9 +593,23 @@ Config File:
     scrub_env: true      # same as --scrub-env
     grok_defense: true   # harden Grok collection + block repo history/secrets
 
+  Filesystem pattern rules (macOS only; quoted glob: mode):
+    filesystem:
+      "~/**/.env": none        # deny reads and writes anywhere under home
+      "~/**/.envrc": none
+      "~/src/**/build": write  # read-write carve-out
+    Modes: none (deny all), read (read-only), write (read-write).
+    Glob syntax: ** matches across directories, * and ? within one path
+    segment. Relative patterns anchor to the project directory. Rules are
+    emitted after allows (not overridable by --allow) but before the
+    read-only cap; later rules may narrow earlier ones.
+
   Example:
     strict: true
     scrub_env: true
+    filesystem:
+      "~/**/.env": none
+      "~/**/.envrc": none
     blocked:
       - ~/.aws
       - ~/.gnupg
@@ -1229,6 +1243,50 @@ sbpl_escape() {
   printf '%s\n' "$p"
 }
 
+# Translate a scode filesystem glob into an anchored SBPL regex body.
+# Supported syntax: ~ (home), ** (any run incl. /), * (any run except /),
+# ? (single char except /). All other characters are matched literally.
+# Output is the regex body only (no #"..."# wrapper, no anchors); the caller
+# anchors with ^...$ . Returns 1 for an unsupported pattern.
+glob_to_sbpl_regex() {
+  local pattern="$1"
+  local out="" i ch
+  for (( i=0; i<${#pattern}; i++ )); do
+    ch="${pattern:i:1}"
+    case "$ch" in
+      '*')
+        if [[ "${pattern:i+1:1}" == "*" ]]; then
+          out+=".*"
+          i=$((i + 1))
+          # Tolerate a following slash: `**/` == any path prefix
+          [[ "${pattern:i+1:1}" == "/" ]] && i=$((i + 1))
+        else
+          out+="[^/]*"
+        fi
+        ;;
+      '?') out+="[^/]" ;;
+      '.') out+="\\." ;;
+      [a-zA-Z0-9/_-]) out+="$ch" ;;
+      *) return 1 ;;
+    esac
+  done
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# Expand a filesystem-rule pattern: ~ prefix to $HOME, relative to project dir.
+expand_fs_pattern() {
+  local pattern="$1"
+  local base_dir="$2"
+  validate_path "$pattern"
+  if [[ "$pattern" =~ ^~/ ]]; then
+    pattern="${HOME}${pattern:1}"
+  elif [[ "$pattern" != /* ]]; then
+    pattern="${base_dir}/${pattern}"
+  fi
+  printf '%s\n' "$pattern"
+}
+
 # Expand ~ and resolve path in the current shell context.
 # Used for --cwd, --config, --log, and SCODE_CONFIG.
 expand_path() {
@@ -1357,13 +1415,41 @@ parse_config() {
     if [[ "$line" =~ ^[[:space:]]*([a-z_]+):[[:space:]]*(#.*)?$ ]]; then
       current_section="${BASH_REMATCH[1]}"
       case "$current_section" in
-        blocked|allowed) ;;
+        blocked|allowed|filesystem) ;;
         *)
           error "invalid config at line ${line_no}: unknown section '${current_section}' (${cfg_file})"
           exit 1
           ;;
       esac
       continue
+    fi
+
+    # filesystem section mapping entries:  "glob/pattern": mode
+    # Quoted keys allow glob metacharacters; mode is none|read|write.
+    if [[ "$current_section" == "filesystem" ]]; then
+      if [[ "$line" =~ ^[[:space:]]*\"(([^\"\\]|\\.)*)\"[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+        local fs_pattern_raw="${BASH_REMATCH[1]}"
+        local fs_mode_raw="${BASH_REMATCH[3]}"
+      local fs_pattern
+      if ! fs_pattern="$(parse_yaml_value "\"${fs_pattern_raw}\"")"; then
+          error "invalid config at line ${line_no}: malformed filesystem pattern (${cfg_file})"
+          exit 1
+        fi
+        if ! fs_mode_raw="$(parse_yaml_value "$fs_mode_raw")"; then
+          error "invalid config at line ${line_no}: malformed quoted value (${cfg_file})"
+          exit 1
+        fi
+        case "$fs_mode_raw" in
+          none|read|write) ;;
+          *) error "invalid config at line ${line_no}: filesystem mode '${fs_mode_raw}' (expected 'none', 'read', or 'write') (${cfg_file})"; exit 1 ;;
+        esac
+        validate_path "$fs_pattern"
+        # Safe: values are defused (\$...) before eval; no interpolation occurs.
+        eval "${prefix}_FS_RULES+=(\"\$fs_pattern|$fs_mode_raw\")"
+        continue
+      fi
+      error "invalid config at line ${line_no}: filesystem entries must be quoted \"pattern\": mode mappings (${cfg_file})"
+      exit 1
     fi
 
     # Scalar key: value (e.g., net: off, strict: true)
@@ -1623,6 +1709,17 @@ write_log_header_json() {
     done
     printf ']'
 
+    # filesystem rules array
+    printf ',"fsrules":['
+    first=1
+    for _i in ${FS_RULES[@]+"${!FS_RULES[@]}"}; do
+      [[ "$first" -eq 1 ]] && first=0 || printf ','
+      printf '{"mode":"%s","regex":"%s"}' \
+        "$(json_escape "${FS_RULES[$_i]%%|*}")" \
+        "$(json_escape "${FS_RULES[$_i]#*|}")"
+    done
+    printf ']'
+
     printf '}\n'
 
     # Legacy comment header (human-readable, parsed by audit_log/audit_watch)
@@ -1637,6 +1734,9 @@ write_log_header_json() {
     done
     for _i in "${!HARNESS_STRICT_RO[@]}"; do
       echo "# allowed: ${HARNESS_STRICT_RO[$_i]}"
+    done
+    for _i in ${FS_RULES_DEBUG[@]+"${!FS_RULES_DEBUG[@]}"}; do
+      echo "# fsrule: ${FS_RULES_DEBUG[$_i]}"
     done
 
     # Extra comment lines (e.g. profile dump, bwrap args)
@@ -2025,7 +2125,10 @@ audit_watch() {
 # SCODE_COVERAGE_EXCLUDE_START
 # Seatbelt uses last-match precedence. Reassert custom blocks after broad
 # carve-outs/automatic allows, then restore only authoritative CLI/user child
-# allows. Finally cap the project at read-only when requested.
+# allows. Filesystem pattern rules follow those allows (they are a security
+# floor that explicit allows must not reopen) but precede the read-only
+# project cap, which stays the final invariant. Finally cap the project at
+# read-only when requested.
 emit_macos_final_guards() {
   local project_dir="$1"
   local fs_mode="$2"
@@ -2066,6 +2169,46 @@ EOF
   (subpath "${esc_dir}")
 )
 EOF
+    done
+  fi
+
+  # Filesystem pattern rules: last-match floor over everything above
+  # (default allows, project grants, explicit allows). Preserved in user
+  # order so a later, narrower rule can carve out an exception to an
+  # earlier one. The read-only cap below still wins for file-write.
+  if [[ ${FS_RULES[0]+_} ]]; then
+    local fs_rule fs_rule_mode fs_rule_regex
+    echo ""
+    echo "; Filesystem pattern rules"
+    for fs_rule in "${FS_RULES[@]}"; do
+      fs_rule_mode="${fs_rule%%|*}"
+      fs_rule_regex="${fs_rule#*|}"
+      case "$fs_rule_mode" in
+        none)
+          cat <<EOF
+(deny file-read* file-write* process-exec
+  (regex #"^${fs_rule_regex}$")
+)
+EOF
+          ;;
+        read)
+          cat <<EOF
+(allow file-read* process-exec
+  (regex #"^${fs_rule_regex}$")
+)
+(deny file-write*
+  (regex #"^${fs_rule_regex}$")
+)
+EOF
+          ;;
+        write)
+          cat <<EOF
+(allow file-read* file-write*
+  (regex #"^${fs_rule_regex}$")
+)
+EOF
+          ;;
+      esac
     done
   fi
 
@@ -2742,6 +2885,7 @@ CLI_BLOCKED=()
 CLI_ALLOWED=()
 CONFIG_BLOCKED=()
 CONFIG_ALLOWED=()
+CONFIG_FS_RULES=()
 # String configs init to "" (unset means "use default"); boolean configs also
 # init to "" so explicit false can be distinguished from "not configured".
 # parse_config() sets these via eval with a CONFIG_ prefix.
@@ -3087,6 +3231,7 @@ parse_config "${CONFIG_FILE}" "CONFIG"
 PROJECT_CONFIG_FILE="${PROJECT_DIR%/}/.scode.yaml"
 PROJECT_BLOCKED=()
 PROJECT_ALLOWED=()
+PROJECT_FS_RULES=()
 PROJECT_NET=""
 PROJECT_FS_MODE=""
 PROJECT_STRICT=""
@@ -3214,6 +3359,48 @@ RESOLVED_PROJECT_BLOCKED=()
 for dir in ${PROJECT_BLOCKED[@]+"${PROJECT_BLOCKED[@]}"}; do
   RESOLVED_PROJECT_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
 done
+
+# -------- Filesystem pattern rules (macOS only) --------
+# Resolve "pattern|mode" entries from user config and project config.
+# Relative patterns anchor to PROJECT_DIR; ~ expands to HOME. Project config
+# is untrusted, so its rules may only deny (mode none).
+FS_RULES=()
+FS_RULES_DEBUG=()
+if [[ "$PLATFORM" != "darwin" && ( ${CONFIG_FS_RULES[0]+_} || ${PROJECT_FS_RULES[0]+_} ) ]]; then
+  warning "filesystem rules are macOS-only; ignoring them on this platform"
+fi
+if [[ "$PLATFORM" == "darwin" ]]; then
+  _fs_rule_parse_failures=0
+  _resolve_fs_rules() {
+    local rules_name="$1"
+    local source_label="$2"
+    local allow_permissive="$3"
+    local rule pattern mode expanded regex_body
+    local -a rules=()
+    eval "rules=(\${${rules_name}[@]+\"\${${rules_name}[@]}\"})"
+    for rule in ${rules[@]+"${rules[@]}"}; do
+      pattern="${rule%%|*}"
+      mode="${rule##*|}"
+      if [[ "$allow_permissive" -eq 0 && "$mode" != "none" ]]; then
+        warning "ignoring project filesystem rule (project config is restrictive-only): ${pattern}: ${mode}"
+        continue
+      fi
+      expanded="$(expand_fs_pattern "$pattern" "$PROJECT_DIR")"
+      if ! regex_body="$(glob_to_sbpl_regex "$expanded")"; then
+        error "unsupported filesystem rule pattern: ${pattern}"
+        _fs_rule_parse_failures=$((_fs_rule_parse_failures + 1))
+        continue
+      fi
+      FS_RULES+=("${mode}|${regex_body}")
+      FS_RULES_DEBUG+=("${source_label} ${pattern} -> ${mode}")
+    done
+  }
+  _resolve_fs_rules CONFIG_FS_RULES config 1
+  _resolve_fs_rules PROJECT_FS_RULES project 0
+  if [[ "$_fs_rule_parse_failures" -gt 0 ]]; then
+    exit 1
+  fi
+fi
 
 # Project allow rules are never authoritative. An allow already covered by a
 # CLI/user allow is harmless and redundant; every other project allow is ignored.
