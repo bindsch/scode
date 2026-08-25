@@ -2325,6 +2325,7 @@ generate_strict_profile() {
 ; a documented limitation of Apple's deprecated sandbox-exec interface.
 (allow sysctl-read)
 (allow mach-lookup)
+(allow file-ioctl)
 
 ; Shared temp storage is denied; a private per-invocation directory is allowed
 ; below after this parent rule.
