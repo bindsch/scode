@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-15
+
+### Added
+
+- **Sandboxed `claude` authenticates on macOS.** Claude Code keeps its
+  subscription credential in the Keychain, which the sandbox blocks along with
+  the rest of `~/Library`, so a sandboxed `claude` reported `Not logged in`
+  against a valid session. Before exec, scode now copies the credential from
+  the Keychain to `~/.claude/.credentials.json`, the file store Claude Code
+  also reads, inside the directory the harness auto-allow already covers. The
+  copy is made from the parent process, which is still outside the sandbox,
+  and remade on every launch: a token refresh migrates the credential back to
+  the Keychain and empties the file, so a copy made once does not hold. The
+  copy never replaces a credential that expires later than the Keychain's,
+  since a refresh inside the sandbox writes the file but cannot write the
+  Keychain, and the provider invalidates the old refresh token on rotation.
+  It is skipped wherever the sandbox could not use it, because there it would
+  only cost secrecy: under `--dry-run`, under `--trust untrusted`, when
+  `--block` puts `~/.claude` or the credential file out of reach, behind a
+  wrapper such as `env` whose final binary cannot be checked, for a `claude`
+  binary inside the project, and when `~/.claude` resolves into the project
+  through a redirected `HOME` or a symlink. `--no-credential-sync` declines
+  the copy; sandboxed `claude` then cannot authenticate. Trade-off, stated in
+  the README: the refresh token rests in a file the sandboxed agent can read,
+  the exposure every other harness's state directory already has.
+
+### Changed
+
+- The help text and README now say that strict mode's harness auto-allow is
+  read-write, which it has been since 0.3.4.
+
 ## [0.3.4] - 2026-08-15
 
 ### Fixed
