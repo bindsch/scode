@@ -3069,6 +3069,11 @@ else
   warning "'${COMMAND[0]}' is not a known harness — sandbox behavior has not been tested for this command"
 fi
 
+# kcov runs only on Linux, so this macOS-only code can never be executed under
+# coverage. The guards that warn are exercised by test/10_credential_sync.bats
+# on the macOS CI job; excluding it here keeps the percentage honest instead of
+# penalizing unreachable lines.
+# SCODE_COVERAGE_EXCLUDE_START
 # Claude Code keeps its credential in the macOS Keychain, which the sandbox
 # blocks along with the rest of ~/Library, so a sandboxed claude reports
 # "Not logged in" against a perfectly valid session. It also reads a file store
@@ -3233,6 +3238,7 @@ raise SystemExit(0 if current >= incoming else 1)
   rm -f "$tmp" 2>/dev/null || true
   warning "could not write ${target}; sandboxed claude will not be able to authenticate"
 }
+# SCODE_COVERAGE_EXCLUDE_END
 
 # -------- Resolve config file --------
 
