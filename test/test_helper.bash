@@ -12,9 +12,34 @@ setup() {
   unset SCODE_CONFIG
   unset SCODE_NET
   unset SCODE_FS_MODE
+  unset SCODE_ACCOUNT_FILE
+  unset SCODE_ACCOUNT_ID
 }
 
 teardown() {
+  # A test that mounted a disk image (see the ENOSPC accounting test)
+  # must have it detached before the project directory is removed. A
+  # detach can fail while a process still holds the volume open, so it
+  # is retried before giving up. If it never succeeds, the backing
+  # files must survive: deleting the image under a mounted volume
+  # corrupts unrelated I/O, so the project directory is left in place
+  # and the failure is reported loudly instead of being swallowed.
+  local _mounted=0 _detach_ok=0 _try
+  if [[ -n "${_SCODE_TEST_MOUNT:-}" ]]; then
+    _mounted=1
+    for _try in 1 2 3; do
+      if hdiutil detach "$_SCODE_TEST_MOUNT" -quiet >/dev/null 2>&1; then
+        _detach_ok=1
+        break
+      fi
+      sleep 2
+    done
+  fi
+  if [[ "$_mounted" -eq 1 && "$_detach_ok" -eq 0 ]]; then
+    echo "teardown: could not detach $_SCODE_TEST_MOUNT; leaving it mounted and leaving $TEST_PROJECT (its backing files) in place" >&2
+    return 1
+  fi
+  _SCODE_TEST_MOUNT=""
   rm -rf "$TEST_PROJECT"
   for _dir in "${_EXTRA_CLEANUP_DIRS[@]}"; do
     rm -rf "$_dir"
@@ -178,4 +203,173 @@ assert_non_strict_mode_output() {
   local out="$1"
   [[ "$out" != *"(deny default)"* ]]
   [[ "$out" != *"# Mode: strict"* ]]
+}
+
+# Emit the pty INT harness used by the accounting signal tests.
+# MODE=group writes ^C to the pty (a group INT); MODE=pid kills scode's
+# pid directly; MODE=timed kills scode's pid SEND_AFTER seconds after
+# spawn; MODE=onstring kills scode's pid as soon as TRIGGER (default:
+# scode's unknown-harness warning, printed after the traps arm and long
+# before the launch) appears in the output -- a deterministic mid-startup
+# arrival; MODE=early writes ^C to the pty immediately after spawn.
+# MODE=groupterm sends SIGTERM to the pty's foreground group.
+# EXTRA_ARGS carries extra scode arguments (e.g. --log FILE). Prints
+# plain fact lines the tests assert on.
+write_pty_int_harness() {
+  cat > "$1" <<'PY'
+import os, pty, re, select, shlex, signal, sys, time
+
+scode = os.environ["SCODE"]
+proj = os.environ["PROJ"]
+acct = os.environ["ACCT"]
+mode = os.environ.get("MODE", "group")
+# SLEEP scales the default engine's lifetime; INNER replaces the engine
+# script outright (e.g. a handler that continues instead of exiting);
+# MARKER is the output token counted as one handler delivery.
+sleep_secs = os.environ.get("SLEEP", "30")
+inner = os.environ.get(
+    "INNER",
+    "trap 'echo handled-int; exit 0' INT; echo engine-ready; sleep %s & wait $!" % sleep_secs,
+)
+marker = os.environ.get("MARKER", "handled-int")
+extra = shlex.split(os.environ.get("EXTRA_ARGS", ""))
+if os.path.exists(acct):
+    os.remove(acct)
+env = dict(os.environ)
+env["SCODE_ACCOUNT_FILE"] = acct
+
+
+def record_ready():
+    # The sink file is created when accounting arms, long before the run
+    # ends, and stays empty until the exit trap writes the record. An
+    # empty file means the run is still going; only content says done.
+    try:
+        return os.path.getsize(acct) > 0
+    except OSError:
+        return False
+
+
+def drain_once(fd, out):
+    # scode is a session leader: while it exits, the kernel holds it in
+    # its exit path until the terminal's output queue drains. A reader
+    # that stops reading parks scode there forever, past SIGKILL, so
+    # the harness keeps reading until the child is reaped.
+    try:
+        r, _, _ = select.select([fd], [], [], 0.05)
+    except OSError:
+        return True
+    if not r:
+        return False
+    try:
+        chunk = os.read(fd, 4096)
+    except OSError:
+        return True
+    if chunk:
+        out.extend(chunk)
+        return False
+    return True
+
+
+def reap_child(pid, fd, out, seconds):
+    # A bounded reap that drains the terminal while it waits, so the
+    # child's exit path never waits on a reader that stopped.
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        wpid, wstatus = os.waitpid(pid, os.WNOHANG)
+        if wpid == pid:
+            return wstatus
+        drain_once(fd, out)
+        time.sleep(0.01)
+    return None
+
+
+pid, fd = pty.fork()
+if pid == 0:
+    os.chdir(proj)
+    os.environ.clear(); os.environ.update(env)
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
+    os.execvp(scode, [scode, "-C", proj] + extra + ["--", "/bin/bash", "-c", inner])
+    os._exit(127)
+
+out = bytearray()
+sent_at = None
+started = time.monotonic()
+if mode == "early":
+    # ^C during scode's own startup, before any handler exists.
+    os.write(fd, b"\x03")
+    sent_at = time.monotonic()
+deadline = time.monotonic() + float(os.environ.get("DEADLINE", str(float(sleep_secs) + 10)))
+while time.monotonic() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if r:
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+    if mode in ("group", "pid", "groupterm") and sent_at is None and b"engine-ready" in out:
+        if mode == "group":
+            os.write(fd, b"\x03")
+        elif mode == "groupterm":
+            # A group TERM cannot be typed; signal the pty's foreground
+            # group the way a supervisor would.
+            os.kill(-pid, signal.SIGTERM)
+        else:
+            os.kill(pid, signal.SIGINT)
+        sent_at = time.monotonic()
+    if mode == "timed" and sent_at is None and time.monotonic() - started > float(os.environ.get("SEND_AFTER", "0.12")):
+        os.kill(pid, signal.SIGINT)
+        sent_at = time.monotonic()
+    if mode == "onstring" and sent_at is None:
+        trigger = os.environ.get("TRIGGER", "not a known harness").encode()
+        if trigger in out:
+            os.kill(pid, signal.SIGINT)
+            sent_at = time.monotonic()
+    if sent_at is not None and record_ready():
+        break
+if sent_at is None:
+    print("engine never became ready")
+    # Stop the child here instead of leaving the engine running past
+    # the harness, and reap it through the draining path: a killed
+    # session leader still cannot finish exiting with output pending.
+    os.kill(pid, signal.SIGKILL)
+    reap_child(pid, fd, out, 10)
+    sys.exit(1)
+# A regression can leave the engine alive past cancellation; a blocking
+# waitpid here would hang the whole suite long after the harness
+# deadline. Bound the wait, then force the issue so no engine outlives
+# the test. Both waits keep draining the terminal: scode's exit path
+# waits for the output queue to drain, and SIGKILL does not interrupt
+# that wait.
+status = reap_child(pid, fd, out, 10)
+if status is None:
+    print("engine did not exit; killing")
+    os.kill(pid, signal.SIGKILL)
+    status = reap_child(pid, fd, out, 10)
+if status is None:
+    print("could not reap scode even after SIGKILL and draining")
+    sys.exit(1)
+rc = os.waitstatus_to_exitcode(status)
+recorded_at = time.monotonic()
+time.sleep(0.3)
+record = open(acct).read() if os.path.exists(acct) else ""
+text = out.decode(errors="replace")
+m = re.search(r'"scratch_path":"([^"]*)"', record)
+scratch = m.group(1) if m else None
+print("mode: %s" % mode)
+print("rc: %s" % rc)
+print("handler fires: %d" % text.count(marker))
+print("forward-warning: %s" % ("yes" if "not forwarding" in text else "no"))
+# engine-ready is printed by the engine as soon as it starts; the
+# handler marker only appears when the signal handler fires. A stub that
+# launches and then dies by the signal must read as launched.
+print("engine seen: %s" % ("yes" if "engine-ready" in text else "no"))
+print("signal-to-record s: %.1f" % (recorded_at - sent_at))
+m_rc = re.search(r'"exit_code":([0-9]+)', record)
+print("record exit_code: %s" % (m_rc.group(1) if m_rc else "none"))
+print("scratch torn down: %s" % (scratch is None or not os.path.exists(scratch)))
+
+PY
 }

@@ -214,6 +214,104 @@ Unknown commands still run but produce a warning that sandbox behavior has not b
 | `SCODE_CONFIG` | Path to config file | `~/.config/scode/sandbox.yaml` |
 | `SCODE_NET` | `on`, `off` | `on` |
 | `SCODE_FS_MODE` | `rw`, `ro` | `rw` |
+| `SCODE_ACCOUNT_FILE` | Path to a file (parent dir must exist) | *(unset)* |
+| `SCODE_ACCOUNT_ID` | Correlation token — letters, digits, `. _ : -`, at most 128 characters | *(unset)* |
+
+When `SCODE_ACCOUNT_FILE` is set, scode appends one JSON line at exit for
+every invocation that gets past argument validation — failed launches
+included; `--help`, `--version`, and `audit` produce no record. The line carries
+per-run scratch usage (`scratch_kib`, measured just before teardown), run
+duration, and exit code — on Linux the `/tmp` tmpfs is unmeasurable from the
+parent, so any run that reached the launch stage records `scratch_kib` as
+`null` there with `reason: "tmpfs_unmeasurable"` (whether the namespace
+actually formed is not observable from outside); a run that never attempted
+a launch (dry-run — and on Linux engine-not-found too) records
+`reason: "no_scratch"`; on macOS an engine-not-found run has already
+created the private scratch directory by the time the engine check fails,
+so that case records the directory with `scratch_kib: 0`.
+A relative `SCODE_ACCOUNT_FILE` resolves against the invoking directory; the
+parent directory must already exist. `SCODE_ACCOUNT_ID` accepts letters,
+digits, and `. _ : -`; other characters drop the id (recorded as `null`), and
+so does an id longer than 128 characters — the token is dropped, never
+truncated. Both variables are unset before the sandboxed command runs, so the child
+does not learn them through its environment. That is confidentiality, not
+integrity: place the account file outside the sandbox's writable area, since
+a sink the command can write is a sink it can forge. The sink must be a
+plain regular file — a symlink, FIFO, or device is rejected with a warning
+and accounting disabled for that run — and it is opened once, when
+accounting is armed (created then if it does not exist yet): the record
+travels through that descriptor, so there is no later open a surviving
+command could race. The directories on the sink's path are fingerprinted
+when accounting is armed, and the write (which happens after the sandbox
+has exited) re-verifies them plus the sink's own identity instead of
+trusting the path again: a command that swaps a parent directory for a
+symlink aimed outside the sandbox — or replaces the sink file itself —
+loses its record to a warning, not an outside write.
+The fingerprint follows links, so an ancestor that already is a symlink is
+tracked by the directory it points at — swapping that target mid-run loses
+the record the same way. Stable system links (macOS `/tmp`) keep their
+identity and work. Each record is a single append bounded at 800 bytes: a
+`scratch_path` that would not fit is nulled rather than splitting the line,
+and a record that still exceeds the bound is dropped with a warning —
+concurrent runs sharing one sink interleave whole lines instead of
+corrupting them. A failed append (a full disk, a file-size limit) is
+reported on stderr and sealed with a best-effort newline, so a partial
+record cannot swallow the next run's line; the run's own exit status is
+never touched. A signal stops the
+run as fast as the engine stops: signals from outside the terminal group
+are forwarded the moment they arrive, and a terminal-group INT, HUP, or
+TERM is not forwarded at all (the terminal or supervisor already
+delivered it to the whole group, so a forward would arrive twice). `exit_code` records the engine's own status either way -- the
+conventional 130/143/129/131 when the engine dies by the signal, the engine's
+own choice when it handles one and exits later. QUIT is not forwarded and
+gets no special handling: a terminal ^\\ kills the engine through its default
+disposition, and scode's own handler exits 131 so the record and teardown
+still happen. Ctrl-C works as before: the launcher
+restores the default SIGINT/SIGQUIT dispositions that bash strips from
+asynchronous children, plus SIGPIPE and SIGXFSZ, which CPython itself
+ignores at startup — so a truncated pipeline (`yes | head`) dies with the
+conventional 141 instead of a write error. Where `/usr/bin/python3` is
+missing, the same restore and the same pending-INT read are retried
+with `/usr/bin/perl` (present on macOS and nearly every Linux host; the
+absolute path keeps a project-supplied perl from running before the
+sandbox starts). Only on a host with neither interpreter does the chain
+warn and keep the ignored dispositions, losing a Ctrl-C queued in the
+launch window. INT and HUP sent by a terminal
+reach the whole foreground process group. scode shares that group with the
+engine — required for the engine's interactive stdin — and no interface
+tells a trap whether the signal was generated for the group or aimed at
+scode's pid alone. scode therefore never forwards a second copy: every
+INT, HUP, or TERM is treated as a terminal-group signal, the engine's own
+exit status stands (the conventional 130/129/143 when it dies by the
+signal, its own choice when it handles one), and a signal aimed at
+scode's pid while scode holds the terminal's foreground group is not
+delivered to the engine. scode
+cannot tell the two cases apart, so the first such signal in a run also
+prints a one-line stderr note that nothing is being forwarded — visible to
+a supervisor that pid-signaled scode, and expected noise for a terminal
+^C. (Known limitation by design: the structural fix
+is to give the engine its own process group and make that group the
+terminal's foreground group, so each signal source has exactly one target.
+Deferred because a stopped engine would become unreportable — bash `wait`
+never returns stopped children, so scode could neither tell the user about
+^Z nor resume the engine.) A TERM signaled at the whole group -- the way a
+supervisor stops a service -- is classified the same way: the delivery has
+already happened, so scode does not forward a second copy, and the
+one-line note names SIGTERM. TERM always forwards, because the terminal
+does not generate it, whenever scode holds no terminal or sits in a
+background group; the same is true for every other signal in those
+positions. Forwarding without terminal truth has a cost: a stop aimed at
+scode's whole process group reaches the engine twice there — the group
+delivery, then scode's forwarded copy. Engines that read a second signal
+as stop-now will cut graceful work short; a pid-directed signal, the
+common supervisor form, is unaffected. The engine-own-group rewrite noted
+above is the structural fix. A signal landing between trap
+installation and the engine's launch is queued: INT is recorded in a
+per-run pending file the launcher reads once it has lifted the async
+SIG_IGN (shared state, so it also covers a signal that arrives between
+the fork and scode's recording of the engine pid) — the engine never
+launches and the run exits with the conventional code — while TERM and
+HUP are delivered right after the launch.
 
 ## Trust presets
 
@@ -479,7 +577,7 @@ scode --log session.log --strict codex
 scode audit --watch session.log
 ```
 
-Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. New logs begin with a machine-readable `#json:` header line, including an exact `argv` array, followed by legacy `# ...` metadata lines for compatibility. Recognized denial formats:
+Output groups denied paths by their blocked parent directory. For default/platform blocks, it suggests the minimal set of `--allow` flags. Custom policy blocks (`--block`, config `blocked:`, project config) are labeled "Blocked by custom policy" with no `--allow` suggestion — the user blocked them intentionally. Logs can include both `# blocked:` and `# allowed:` metadata; `audit` uses both when present and falls back to built-in defaults for older logs without metadata. New logs begin with a machine-readable `#json:` header line, including an exact `argv` array, followed by legacy `# ...` metadata lines for compatibility. A log that ends with a `scode-log-complete run <pid>-<token>` line is proven complete: scode appends that sentinel through the logging pipe only after the engine has been reaped, then waits, bounded, for it to reach the file before ending the log writer. The writer mirrors the logging pipe to scode's stderr, so the sentinel line also appears there once per `--log` run. The token is drawn from the OS randomness source each run and unguessable from inside the sandbox; a host that cannot read the OS randomness source falls back to a weaker shell-random token. If the sentinel does not arrive within that window, the writer is ended anyway and the run reports the log as incomplete. When the sentinel has arrived but the writer outstays the drain grace, scode ends it and warns that its stderr mirror may be missing the tail of the output; the log itself is complete. Once the writer has ended, output that a daemonized grandchild writes after the engine has been reaped is not waited for and can be lost. Recognized denial formats:
 
 - macOS `sandbox-exec`: `deny(file-read-data) /path`
 - Generic Unix: `/path: Permission denied`, `/path: Operation not permitted`
