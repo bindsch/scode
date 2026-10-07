@@ -353,7 +353,7 @@ Use Linux equivalents where paths differ.
 
 - The harness config and state paths listed above
 
-This means `scode --strict claude` can both read and update `~/.claude`, which it must: the harness rewrites its own credential when the provider rotates the refresh token, and a harness that cannot write the replacement destroys its login on first refresh. It does not reopen browser profiles, Keychains, or broad macOS `~/Library` subtrees. `scode --trust untrusted claude` does not expose `~/.claude` at all unless the caller explicitly uses `--allow`.
+This means `scode --strict claude` can both read and update `~/.claude`, which it must: the harness writes its own state there (and, for every harness but Claude Code on macOS, rotates its own refresh token in place; a sandboxed `claude` receives an access token only, see the credential section) on first refresh. It does not reopen browser profiles, Keychains, or broad macOS `~/Library` subtrees. `scode --trust untrusted claude` does not expose `~/.claude` at all unless the caller explicitly uses `--allow`.
 
 Detection is conservative: only the command binary (or the binary behind supported transparent wrappers) triggers auto-allow. Harness names appearing as arguments do not — `scode --strict -- echo claude` does not auto-allow `~/.claude`.
 
@@ -636,29 +636,49 @@ first time the token rotates. Deleting the Keychain item to force file-only
 storage does not help either: the next refresh recreates it and removes the file
 again. The copy has to be remade at each launch, which is what scode does.
 
-**This trades credential secrecy for sandboxed operation, and the trade is what
-running a harness sandboxed costs.** In the Keychain the refresh token is
-unreachable inside the sandbox and ACL-gated outside it. In `~/.claude` it sits
-in a directory the sandbox grants read-write, and `sandbox-exec` cannot
-distinguish the harness from the processes it spawns, so anything the model runs
-can read the token, with the network reachable by default.
+**Only the access token is copied; the refresh token never leaves the
+Keychain.** The file receives the Keychain item with `refreshToken` emptied and
+`refreshTokenExpiresAt` dropped, so a sandboxed `claude` authenticates for the
+access token's lifetime (hours) and fails with a plain 401 once it expires or
+is revoked. It cannot refresh, and that is deliberate: a copy that could refresh
+would rotate the grant the operator's interactive Claude Code holds, and a
+stale copy presenting the superseded refresh token makes the provider revoke the
+whole grant family, which logs the operator out of every Claude session. The
+access token is a bearer credential with no rotation, so copies of it are
+harmless, and the copy is remade at each launch from whatever the Keychain
+holds then. Inside the sandbox the token sits in a directory the sandbox grants
+read-write, so anything the model runs can read it for those hours -- the same
+exposure every other harness's state directory has, bounded to the access
+token's lifetime.
 
-This is not a new exposure so much as an explicit one: the same auto-allow
-already covers `~/.codex`, `~/.gemini`, and every other harness state directory,
-each holding that harness's credential, for the same reason — they all rotate
-refresh tokens and must be able to write the replacement. A harness you run
-sandboxed can always read its own credential. What changes here is that Claude
-Code stops being the exception that Keychain storage made it.
-
-The copy never replaces a newer credential with an older one. A refresh that
-happens inside the sandbox writes the file and cannot write the Keychain, so
-copying unconditionally would overwrite a live token with a spent one -- and
-because the provider invalidates the old refresh token when it issues a
-replacement, that would destroy the only working login. Whichever expires later
-stays.
+The scrub needs a readable Keychain item: with the Keychain locked or the read
+denied, nothing is emptied blind (the file's token might be the only working
+login) and a file that still carries a refresh token refuses the launch, as does
+a file that cannot be scrubbed. Before a refresh token is
+removed, the file is copied to `~/Library/Application Support/scode/credential-backups/`
+(0700, files 0600), under `~/Library`, which the sandbox blocks, so no sandboxed child
+can read it; a Keychain item that exists but cannot be read (locked, denied) mirrors
+nothing and refuses the launch when the file still carries a refresh token. The one
+file left alone
+is one with no Keychain item behind it at all (a file-only login): that file is
+Claude Code's only credential store, not a mirror, and the sandboxed `claude`
+rotates the same single copy the operator uses. The copy then replaces whatever the file holds unless it
+already carries the Keychain's access token and no refresh token (an expired
+Keychain access token is not copied, and a file without a refresh token is then
+left as it is). A file still holding a refresh
+token (written by an older scode, or by Claude Code itself) is scrubbed on the
+next launch whatever else it says. Expiry ordering plays no part: the file
+cannot refresh, so it is never the newer credential, and a revoked token with a
+later expiry must not be kept.
 
 Decline the copy with `--no-credential-sync`; sandboxed `claude` then cannot
-authenticate. It is also refused when the harness runs behind a wrapper such as
+authenticate. Declining the copy does not decline the rule: wherever the
+sandbox could still read `~/.claude` (the opt-out, a wrapper, a harness or a
+`~/.claude` inside the project, a symlinked credential path), a file that holds
+a refresh token while a Keychain item exists refuses the launch rather than
+handing the token to the child; with no Keychain item the file is left alone.
+An explicit `--allow` over `~/Library/Application Support/scode` would expose
+the backups to the sandbox; do not grant it. It is also refused when the harness runs behind a wrapper such as
 `env`, whose final binary scode cannot inspect, and for a `claude` binary inside
 the project, since a repository can ship its own and PATH may find it first -- opening a directory
 to a basename match is one thing, handing it a credential is another. The copy

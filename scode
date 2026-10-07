@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.4.0"
+readonly PROGRAM_VERSION="0.5.0"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -641,8 +641,10 @@ Examples:
 Strict Mode Auto-Allow:
   When --strict detects a known harness, it automatically allows read-write access to:
     - The harness config/state paths (e.g. ~/.claude for claude)
-  Write access is required: OAuth harnesses rotate credentials and must persist
-  the replacement, or the login is destroyed the first time the token expires.
+  Write access is required: harnesses keep their state there, and most rotate
+  their own credential in place. A sandboxed claude is the exception: it gets
+  an access-token-only copy of the Keychain credential (see the README) and
+  never holds the refresh token.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
   --trust untrusted disables harness-state auto-allows entirely.
 
@@ -4346,56 +4348,74 @@ fi
 # it back to the Keychain and deletes the file. So the copy is made here, in the
 # parent process, which is still outside the sandbox and can read the Keychain.
 #
-# This puts the refresh token in a file the sandboxed agent can read, which is
-# the same exposure every other harness already has for ~/.codex and the rest,
-# and is what running a harness sandboxed costs. --no-credential-sync declines
-# it; sandboxed claude then cannot authenticate.
+# Only the ACCESS token is copied; the refresh token never leaves the Keychain.
+# A sandboxed claude authenticates for the access token's lifetime (hours) and
+# fails with a plain 401 when it expires or is revoked -- it cannot refresh.
+# That restriction is the point: a copy that could refresh would rotate the
+# grant the operator's interactive Claude Code holds, and a stale copy
+# presenting the superseded refresh token makes the provider revoke the whole
+# grant family, logging the operator out of every Claude session (which is
+# what happened on 2026-10-05 when the copy still carried it). The access
+# token is a bearer credential without rotation, so copies of it are harmless.
+# --no-credential-sync declines the copy; sandboxed claude then cannot
+# authenticate.
+# Whether the Claude credential file at $1 holds a refresh token (read
+# through any symlink; a non-file or unreadable path counts as "no").
+claude_file_holds_refresh_token() {
+  [[ -f "$1" ]] || return 1
+  /usr/bin/python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1]) as handle:
+        oauth = (json.load(handle).get("claudeAiOauth") or {})
+except (OSError, ValueError, AttributeError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(oauth, dict) and oauth.get("refreshToken") else 1)
+' "$1" 2>/dev/null
+}
+
+# Whether a Claude Code Keychain item exists at all (the secret is not read:
+# exit 44 is "not found", anything else means an item is there). With no
+# item the credential file is Claude Code's only store and a refresh token
+# in it is normal; with one, the file is a mirror and that token is the
+# second copy that revokes logins.
+claude_keychain_item_exists() {
+  local _status=0
+  security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 || _status=$?
+  [[ "$_status" -ne 44 ]]
+}
+
+# The one rule that holds on every path where the sandboxed claude could read
+# ~/.claude: with a Keychain item present, a refresh token in the credential
+# file is not launched through. $1 says why the copy itself is not happening.
+refuse_claude_refresh_token_if_mirrored() {
+  claude_file_holds_refresh_token "$HOME/.claude/.credentials.json" || return 0
+  claude_keychain_item_exists || return 0
+  refuse_claude_refresh_token "$1"
+}
+
+refuse_claude_refresh_token() {
+  error "$HOME/.claude/.credentials.json holds a Claude refresh token and scode is not syncing it ($1); refusing to launch a sandboxed claude with it (a child holding that token could revoke your Claude login). Empty the refreshToken value in that file, or let scode sync it, and retry."
+  exit 1
+}
+
 sync_claude_credential() {
   [[ "$PLATFORM" == "darwin" ]] || return 0
   # Homebrew's claude resolves through a symlink to claude.exe, so the detected
   # name carries the suffix that is_known_harness already strips.
   [[ "${DETECTED_HARNESS%.exe}" == "claude" ]] || return 0
-  [[ "$CREDENTIAL_SYNC" -eq 1 ]] || return 0
   command -v security >/dev/null 2>&1 || return 0
 
   # Only write the credential where a sandboxed process could actually use it.
-  # Everywhere else the copy is pure secrecy loss: it moves the refresh token
-  # out of the Keychain, where per-binary ACLs guard it, into a file any process
-  # running as this user can read, and buys nothing back.
+  # Everywhere else the copy would only move the access token into a file the
+  # sandbox cannot reach, for nothing.
   #
-  # --dry-run promises to inspect without acting. --trust untrusted drops the
-  # harness auto-allow, so the sandbox cannot read ~/.claude at all. And
-  # blocking ~/.claude is a direct instruction to keep the credential away from
-  # this run, which writing it there first would contradict.
+  # --dry-run promises to inspect without acting. Blocking ~/.claude is a
+  # direct instruction to keep the credential away from this run, which
+  # writing it there first would contradict -- and where the sandbox cannot
+  # read the file, no refusal applies either, so reachability is settled
+  # first.
   [[ "$DRY_RUN" -eq 1 ]] && return 0
-  [[ "$CLI_TRUST" == "untrusted" ]] && return 0
-  # Only a direct invocation is inspectable. Behind a wrapper -- env, nice,
-  # timeout -- the binary scode resolved is the wrapper, and the harness it
-  # finally executes is chosen by a PATH the wrapper sets, which is how
-  # `env PATH=$PWD:$PATH claude` passed the check below as /usr/bin/env and
-  # then ran a repository-controlled claude with the token in reach.
-  if [[ "$(basename "${COMMAND_BINARY_PATH:-}")" != "${DETECTED_HARNESS}" ]]; then
-    warning "not syncing the Claude credential: '${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
-    return 0
-  fi
-
-  # A binary inside the project is not the installed harness. A repository can
-  # ship its own ./claude, or a node_modules/.bin/claude, and PATH may well find
-  # it first; copying the real OAuth token for that is handing a credential to
-  # whatever the project chose to call itself. The harness auto-allow tolerates
-  # a basename match because it only opens a directory; this writes a secret.
-  local resolved="${COMMAND_BINARY_PATH:-}"
-  if [[ -n "$resolved" && -n "${PROJECT_DIR:-}" ]]; then
-    case "$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)/" in
-      "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"/*)
-        warning "not syncing the Claude credential: '${resolved}' lives inside the project"
-        return 0
-        ;;
-    esac
-  fi
-
-  # An explicit --allow re-opens a blocked path, so a block alone does not mean
-  # the sandbox cannot reach the credential; consult the effective policy first.
   local _explicitly_allowed=0
   local _allowed_path
   for _allowed_path in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
@@ -4423,10 +4443,54 @@ sync_claude_credential() {
 
   # Declared separately: within one `local`, $dir is not yet assigned when a
   # later name on the same line expands it, which trips set -u.
+  # --trust untrusted drops the auto-allow, so the sandbox cannot read
+  # ~/.claude -- unless the operator re-opened it with an explicit --allow,
+  # in which case nothing is copied but the one rule still applies.
+  if [[ "$CLI_TRUST" == "untrusted" ]]; then
+    [[ "$_explicitly_allowed" -eq 1 ]] && refuse_claude_refresh_token_if_mirrored "--trust untrusted declines the copy"
+    return 0
+  fi
+  # Only a direct invocation is inspectable. Behind a wrapper -- env, nice,
+  # timeout -- the binary scode resolved is the wrapper, and the harness it
+  # finally executes is chosen by a PATH the wrapper sets, which is how
+  # `env PATH=$PWD:$PATH claude` passed the check below as /usr/bin/env and
+  # then ran a repository-controlled claude with the token in reach.
+  if [[ "$(basename "${COMMAND_BINARY_PATH:-}")" != "${DETECTED_HARNESS}" ]]; then
+    refuse_claude_refresh_token_if_mirrored "'${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
+    warning "not syncing the Claude credential: '${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
+    return 0
+  fi
+
+  # A binary inside the project is not the installed harness. A repository can
+  # ship its own ./claude, or a node_modules/.bin/claude, and PATH may well find
+  # it first; copying the real OAuth token for that is handing a credential to
+  # whatever the project chose to call itself. The harness auto-allow tolerates
+  # a basename match because it only opens a directory; this writes a secret.
+  local resolved="${COMMAND_BINARY_PATH:-}"
+  if [[ -n "$resolved" && -n "${PROJECT_DIR:-}" ]]; then
+    case "$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)/" in
+      "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"/*)
+        refuse_claude_refresh_token_if_mirrored "'${resolved}' lives inside the project"
+        warning "not syncing the Claude credential: '${resolved}' lives inside the project"
+        return 0
+        ;;
+    esac
+  fi
+
+  # An explicit --allow re-opens a blocked path, so a block alone does not mean
+  # the sandbox cannot reach the credential; consult the effective policy first.
   local dir="$HOME/.claude"
   local target="$dir/.credentials.json"
   local tmp=""
   [[ -d "$dir" ]] || return 0
+
+  # The opt-out declines the copy, not the one rule — and only matters here,
+  # past the guards above, where the sandbox can actually read the file.
+  if [[ "$CREDENTIAL_SYNC" -ne 1 ]]; then
+    refuse_claude_refresh_token_if_mirrored "--no-credential-sync is set"
+    return 0
+  fi
+
 
   # Resolve where the write would actually land. HOME can be redirected and
   # ~/.claude can be a symlink, either of which would put the real refresh
@@ -4439,6 +4503,7 @@ sync_claude_credential() {
     if [[ -n "$real_project" ]]; then
       case "$real_dir/" in
         "$real_project"/*)
+          refuse_claude_refresh_token_if_mirrored "${real_dir} is inside the project"
           warning "not syncing the Claude credential: ${real_dir} is inside the project"
           return 0
           ;;
@@ -4446,58 +4511,141 @@ sync_claude_credential() {
     fi
   fi
 
-  local secret
-  secret="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)" || return 0
-  [[ -n "$secret" ]] || return 0
+  # A symlinked ~/.claude or credential file is never read through, merged,
+  # or written through: the copy would land wherever the link points, and a
+  # rewrite would turn whatever file the link reaches into one the sandbox
+  # can read. Nothing is synced then; a refresh token behind the link is the
+  # usual refusal when a Keychain item exists.
+  if [[ -L "$dir" || -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
+    refuse_claude_refresh_token_if_mirrored "${target} or ${dir} is a symbolic link"
+    warning "not syncing the Claude credential: ${target} or ${dir} is a symbolic link"
+    return 0
+  fi
 
-  # Only the tokens matter; anything else means the item is not a credential we
-  # can hand to the harness, and writing it would replace a working file.
-  # The system interpreter by name, not $PYTHON_BIN: this one is fed the
-  # credential on stdin, and an inherited variable should not choose what reads
-  # it. macOS always ships /usr/bin/python3.
-  printf '%s' "$secret" | /usr/bin/python3 -c '
-import json, sys
+  # Exit 44 (errSecItemNotFound) means no Keychain entry at all: then the
+  # file is not a mirror but Claude Code's one and only credential store,
+  # its refresh token the operator's only copy, and the sandboxed claude is
+  # the same Claude Code rotating that same file -- one copy, no divergence,
+  # nothing to scrub. It is left exactly as it is. Any other failure (locked
+  # keychain, denied ACL, timeout) means an entry exists and the file is a
+  # mirror, so a refresh token in it must still go.
+  local secret security_status=0
+  secret="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)" || security_status=$?
+  if [[ "$security_status" -eq 44 ]]; then
+    return 0
+  fi
+
+  local holds_refresh=0
+  claude_file_holds_refresh_token "$target" && holds_refresh=1
+
+  # A Keychain entry exists but could not be read (locked keychain, denied
+  # ACL, timeout) or came back empty. Nothing can be mirrored, and nothing is
+  # destroyed either: the file's refresh token might be the only working
+  # login (an old sandbox rotation could have left the Keychain's copy dead),
+  # so it is not emptied blind. A file that carries one is not launched
+  # through; a file without one launches and will report its own 401 if stale.
+  if [[ "$security_status" -ne 0 || -z "$secret" ]]; then
+    [[ "$holds_refresh" -eq 1 ]] && refuse_claude_refresh_token "the Keychain cannot be read (status ${security_status}); unlock it"
+    return 0
+  fi
+
+  # What the file may hold. With a usable Keychain access token: that token
+  # and the fields beside it, refresh token emptied, merged over the file's
+  # other top-level fields (Claude Code co-stores mcpOAuth state there). With
+  # a Keychain entry that holds nothing usable (co-stored state only, or an
+  # access token already expired): the file's own credential with only the
+  # refresh token removed — the Keychain owns the login, so the file is a
+  # mirror and the token in it is the second copy. Built outside the sandbox
+  # by the system interpreter, which is fed the secret on stdin.
+  local mirror mirror_status=0
+  mirror="$(printf '%s' "$secret" | /usr/bin/python3 -c '
+import json, sys, time
+secret = json.load(sys.stdin)
+keychain = secret.get("claudeAiOauth") if isinstance(secret, dict) else None
+if not isinstance(keychain, dict):
+    keychain = {}
+access = keychain.get("accessToken")
+expires = keychain.get("expiresAt")
+usable = isinstance(access, str) and access != "" and not (
+    isinstance(expires, (int, float)) and expires <= time.time() * 1000)
+current = {}
 try:
-    d = json.load(sys.stdin).get("claudeAiOauth") or {}
-except ValueError:
-    raise SystemExit(1)
-raise SystemExit(0 if d.get("accessToken") and d.get("refreshToken") else 1)
-' 2>/dev/null || return 0
+    with open(sys.argv[1]) as handle:
+        loaded = json.load(handle)
+    if isinstance(loaded, dict):
+        current = loaded
+except (OSError, ValueError):
+    pass
+own = current.get("claudeAiOauth")
+if not isinstance(own, dict):
+    own = {}
+if usable:
+    oauth = {k: keychain[k] for k in ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier") if k in keychain}
+    oauth["refreshToken"] = ""
+elif own.get("refreshToken"):
+    oauth = dict(own)
+    oauth.pop("refreshTokenExpiresAt", None)
+    oauth["refreshToken"] = ""
+    if not oauth.get("accessToken"):
+        oauth["accessToken"] = ""
+        if not isinstance(oauth.get("expiresAt"), (int, float)): oauth["expiresAt"] = 0
+        if not isinstance(oauth.get("scopes"), list): oauth["scopes"] = []
+else:
+    raise SystemExit(3)  # nothing to mirror and nothing to scrub
+if own.get("accessToken") == oauth.get("accessToken") and not own.get("refreshToken") and own.get("refreshToken", None) is not None:
+    raise SystemExit(3)  # already exactly what the child may hold
+current["claudeAiOauth"] = oauth
+print(json.dumps(current))
+' "$target" 2>/dev/null)" || mirror_status=$?
+  if [[ "$mirror_status" -eq 3 || ( "$mirror_status" -eq 0 && -z "$mirror" ) ]]; then
+    return 0
+  fi
+  if [[ "$mirror_status" -ne 0 ]]; then
+    [[ "$holds_refresh" -eq 1 ]] && refuse_claude_refresh_token "the credential could not be prepared"
+    return 0
+  fi
 
-  # The Keychain is not always the newer copy. A refresh that happens inside the
-  # sandbox writes the file and cannot write the Keychain, so copying
-  # unconditionally would replace a live credential with a spent one -- and
-  # since the provider invalidates the old refresh token when it issues a
-  # replacement, that destroys the only working login. Whichever expires later
-  # is the newer one, and it stays.
-  if [[ -s "$target" ]]; then
-    if /usr/bin/python3 -c '
-import json, sys
-def expiry(path):
-    try:
-        with open(path) as handle:
-            return int((json.load(handle).get("claudeAiOauth") or {}).get("expiresAt") or 0)
-    except (OSError, ValueError, TypeError):
-        return -1
-current = expiry(sys.argv[1])
-incoming = int((json.loads(sys.stdin.read()).get("claudeAiOauth") or {}).get("expiresAt") or 0)
-raise SystemExit(0 if current >= incoming else 1)
-' "$target" <<< "$secret" 2>/dev/null; then
-      return 0
+  # A file that still carries a refresh token is backed up before it is
+  # replaced: that token may be the operator's only working login, and scode
+  # never destroys a credential it cannot prove superseded. The copy goes
+  # under ~/Library, which this sandbox blocks wholesale, never beside the
+  # file (the child reads that directory): directory 0700, file 0600.
+  local backup=""
+  if [[ "$holds_refresh" -eq 1 ]]; then
+    local backup_dir="$HOME/Library/Application Support/scode/credential-backups"
+    if mkdir -p "$backup_dir" 2>/dev/null && chmod 700 "$backup_dir" 2>/dev/null; then
+      backup="$(mktemp "$backup_dir/credentials.XXXXXX" 2>/dev/null)" || backup=""
+    fi
+    if [[ -z "$backup" ]] || ! { chmod 600 "$backup" 2>/dev/null && cat "$target" > "$backup" 2>/dev/null; }; then
+      [[ -n "$backup" ]] && rm -f "$backup" 2>/dev/null
+      refuse_claude_refresh_token "it could not be backed up before scrubbing"
     fi
   fi
 
   # Written under a random name and renamed, so a concurrent reader sees either
-  # the old credential or the new one, never a partial file.
-  tmp="$(mktemp "$dir/.credentials.XXXXXX" 2>/dev/null)" || return 0
-  chmod 600 "$tmp" 2>/dev/null || true
-  # A failure here is worth saying out loud: the harness will start and then
-  # report itself logged out, which looks like an expired session rather than a
-  # sandbox that could not hand over the credential.
-  if printf '%s' "$secret" > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
+  # the old credential or the new one, never a partial file. When the write
+  # fails and the file still holds a refresh token, the launch is refused —
+  # the child would otherwise start with that token; the backup just made is
+  # removed again, the file being unchanged.
+  tmp="$(mktemp "$dir/.credentials.XXXXXX" 2>/dev/null)" || tmp=""
+  if [[ -n "$tmp" ]] && chmod 600 "$tmp" 2>/dev/null && printf '%s\n' "$mirror" > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
+    if [[ -n "$backup" ]]; then
+      # Only the newest copy is kept once its rewrite has succeeded: each one
+      # holds a whole grant. Older files are pruned, never a newer one (a
+      # parallel launch may have written it and may still need it).
+      local _older
+      for _older in "$(dirname "$backup")"/credentials.*; do
+        [[ -f "$_older" && "$_older" != "$backup" && "$_older" -ot "$backup" ]] && rm -f "$_older" 2>/dev/null
+      done
+      warning "the Claude credential file held a refresh token; a copy was kept at ${backup} (0600, outside the sandbox) and the file was rewritten without it"
+    fi
     return 0
   fi
-  rm -f "$tmp" 2>/dev/null || true
+  [[ -n "$tmp" ]] && rm -f "$tmp" 2>/dev/null
+  if [[ "$holds_refresh" -eq 1 ]]; then
+    [[ -n "$backup" ]] && rm -f "$backup" 2>/dev/null
+    refuse_claude_refresh_token "${target} could not be rewritten"
+  fi
   warning "could not write ${target}; sandboxed claude will not be able to authenticate"
 }
 # SCODE_COVERAGE_EXCLUDE_END

@@ -5,10 +5,13 @@
 # cases launch a real sandbox around a fake `claude` and inspect a fake home
 # from outside. scode pins PATH to the system directories before doing
 # anything, so `security` cannot be shadowed by a test double: the copy itself
-# needs a real Keychain item and is verified by hand. What can be checked
-# without one is the three guards that refuse the copy and say so on stderr
-# (a wrapper, a harness inside the project, a ~/.claude inside the project),
-# plus the opt-out flag. The guards that return silently (--dry-run, --trust
+# needs a real Keychain item and is verified by hand, as do the refusals
+# (a refresh token in the file while a Keychain item exists is never launched
+# through). What can be checked without one is the three guards that decline
+# the copy and say so on stderr (a wrapper, a harness inside the project, a
+# ~/.claude inside the project), the opt-out flag, and the file-only-login
+# exception: with no Keychain item (a fake HOME has none) a refresh token in
+# the file is Claude Code's own and the launch proceeds with it untouched. The guards that return silently (--dry-run, --trust
 # untrusted, a --block over ~/.claude, no ~/.claude at all) leave nothing to
 # observe without a Keychain item, so they are not asserted here.
 
@@ -91,4 +94,25 @@ run_scode() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"CODEX_OK"* ]]
   [[ "$output" != *"Claude credential"* ]]
+}
+
+@test "credential sync: a file-only login (no Keychain item) is left untouched and launches" {
+  require_runtime_sandbox
+  # `security` takes its keychain search list from $HOME (verified: with a
+  # redirected HOME it exits 44, "not found", even on a machine whose real
+  # login keychain holds the item). Skip rather than assert on a machine
+  # where that does not hold.
+  local probe_status=0
+  HOME="$FAKE_HOME" security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 || probe_status=$?
+  [ "$probe_status" -eq 44 ] || skip "a Keychain item is visible from the fake HOME on this machine"
+  printf '{"claudeAiOauth":{"accessToken":"a","refreshToken":"only-copy"}}\n' > "$FAKE_HOME/.claude/.credentials.json"
+  chmod 600 "$FAKE_HOME/.claude/.credentials.json"
+  run_scode --no-credential-sync -C "$PROJECT" -- claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAUDE_OK"* ]]
+  grep -q only-copy "$FAKE_HOME/.claude/.credentials.json"
+  run_scode -C "$PROJECT" -- env claude
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CLAUDE_OK"* ]]
+  grep -q only-copy "$FAKE_HOME/.claude/.credentials.json"
 }

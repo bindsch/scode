@@ -7,6 +7,39 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-07
+
+### Security
+
+- **The Claude credential copy no longer carries the refresh token.** The
+  file scode writes to `~/.claude/.credentials.json` before a sandboxed
+  `claude` launch now holds the Keychain item with `refreshToken` emptied and
+  `refreshTokenExpiresAt` dropped. A sandboxed `claude` authenticates for the
+  access token's lifetime and fails with a plain 401 when it expires or is
+  revoked; it cannot refresh. Root cause of the 2026-10-05 lockout: a
+  sandboxed copy holding the operator's refresh token rotated it, or
+  presented a stale one after the interactive Claude Code had rotated it,
+  and the provider revoked the whole grant family, logging the operator out
+  of every Claude session. The copy now replaces the file unless it already
+  holds the Keychain's access token and no refresh token (an expired Keychain
+  access token is not copied, and a file without a refresh token is then left
+  as it is); a file still
+  carrying a refresh token is scrubbed on the next launch, and when the
+  Keychain is locked or the read is denied nothing is emptied blind: a file
+  that still carries a refresh token refuses the launch, as does a file that
+  cannot be scrubbed, and the file is copied to
+  `~/Library/Application Support/scode/credential-backups/` (0700/0600, out of
+  the sandbox's reach) before a refresh token is removed from it; a Keychain
+  item that exists but cannot be read refuses the launch when the file still
+  carries a refresh token; a file with no Keychain item behind it at all
+  is Claude Code's only store and is left untouched (that exception holds at
+  every refusal point: `--no-credential-sync`, a wrapper, an in-project
+  harness or `~/.claude`, a symlinked credential path — which is also never
+  read through or rewritten); older backups are pruned once a rewrite
+  succeeded, never a newer one — and the
+  "whichever expires later stays" rule is gone with the rotation it existed
+  for.
+
 ### Added
 
 - **Per-run scratch usage accounting (opt-in).** Setting `SCODE_ACCOUNT_FILE`
