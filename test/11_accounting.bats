@@ -859,7 +859,13 @@ print("QUIT:", signal.getsignal(signal.SIGQUIT))'
     "$SCODE" -C "$TEST_PROJECT" -- /bin/sh -c 'printf "markers[%s]\n" "${SDKROOT+1}${CPATH+1}${LIBRARY_PATH+1}"'
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -cF 'markers[]')" -eq 1 ]
-  SCODE_ACCOUNT_FILE="$acct" run env SDKROOT=/sdk CPATH=/inc LIBRARY_PATH=/lib \
+  # A real SDK path: on a host with a full Xcode the xcrun shim behind
+  # /usr/bin/python3 refuses a bogus SDKROOT before any script runs, which
+  # would fail the launch for a reason this test is not about. Presence is
+  # what the markers check, not the value.
+  local sdk
+  sdk="$(/usr/bin/xcrun --show-sdk-path 2>/dev/null || printf '/sdk')"
+  SCODE_ACCOUNT_FILE="$acct" run env SDKROOT="$sdk" CPATH=/inc LIBRARY_PATH=/lib \
     "$SCODE" -C "$TEST_PROJECT" -- /bin/sh -c 'printf "markers[%s]\n" "${SDKROOT+1}${CPATH+1}${LIBRARY_PATH+1}"'
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -cF 'markers[111]')" -eq 1 ]

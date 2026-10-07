@@ -740,7 +740,7 @@ ensure_log_parent_dir() {
 # status is the honest one, and forcing 128+n there would rewrite a run
 # that was never actually interrupted. Both helpers reach the caller's
 # signal_rc / command_pid / pending_signals through bash dynamic scoping.
-# shellcheck disable=SC2329  # referenced from the runners' trap strings
+# shellcheck disable=SC2329,SC2317  # referenced from the runners' trap strings (SC2317 is the same report under shellcheck 0.9)
 forward_run_signal() {
   if [[ -n "${command_pid:-}" ]]; then
     if kill -"$1" "${command_pid}" 2>/dev/null; then
@@ -824,7 +824,7 @@ flush_pending_signals() {
 # that forked before the queue was written. (The log runner's traps skip
 # killing the writer on that branch, so the delivery keeps its stderr
 # reader.)
-# shellcheck disable=SC2329  # referenced from the runners' trap strings
+# shellcheck disable=SC2329,SC2317  # referenced from the runners' trap strings (SC2317 is the same report under shellcheck 0.9)
 forward_or_note() {
   local _fields _tpgid _pgid _is_int=""
   if [[ "$1" == "INT" ]]; then _is_int=1; fi
@@ -884,7 +884,7 @@ forward_or_note() {
 # Post-exec the file has no reader, so a
 # late record is a harmless no-op -- the property that makes
 # append-alongside-kill single-delivery in every launch phase.
-# shellcheck disable=SC2329  # called from forward_or_note, itself referenced from trap strings
+# shellcheck disable=SC2329,SC2317  # called from forward_or_note, itself referenced from trap strings (SC2317 is the same report under shellcheck 0.9)
 note_pending_int() {
   printf 'INT\n' >&7 2>/dev/null || true
 }
