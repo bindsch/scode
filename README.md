@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.4.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
+> **Beta software (v0.5.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
 scode wraps AI coding tools (Claude, Codex, Aider, Grok, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
@@ -54,7 +54,7 @@ brew install bindsch/tap/scode
 ### From source
 
 ```bash
-EXPECTED_COMMIT="b5a1fff6b985e0a208124b5f070525b199bfd868" # v0.4.0
+EXPECTED_COMMIT="de663506fbeaa7e3d8448dc12e685c69c6b8df82" # v0.5.0
 git clone --filter=blob:none https://github.com/bindsch/scode.git
 cd scode
 git checkout --detach "$EXPECTED_COMMIT"
@@ -86,14 +86,14 @@ make uninstall PREFIX="$HOME/.local"
 ### Manual
 
 ```bash
-COMMIT="b5a1fff6b985e0a208124b5f070525b199bfd868" # v0.4.0
+COMMIT="de663506fbeaa7e3d8448dc12e685c69c6b8df82" # v0.5.0
 tmp="$(mktemp -d)"
 base="https://raw.githubusercontent.com/bindsch/scode/${COMMIT}"
 curl -fsSLo "$tmp/scode" "$base/scode"
 curl -fsSLo "$tmp/no-sandbox.js" "$base/lib/no-sandbox.js"
 curl -fsSLo "$tmp/LICENSE" "$base/LICENSE"
 (cd "$tmp" && printf '%s  %s\n' \
-  669e7e2bf82f4ce38a0fb00ca2eb4448015815eaae93fb2299ef11dde4713073 scode \
+  f154acaede6241838d23540235f30c860812c963edaa2edd6d711f12d2638e10 scode \
   131cb3edc4e5149de8a3ad619824d1b99b8f35b053d0031e6aa46b286a56b944 no-sandbox.js \
   60e0aac1186a0ea1be7c13e1cc7a8475100fae5572abc23bbad33e3cdfa726dd LICENSE \
   | shasum -a 256 -c -)
