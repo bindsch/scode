@@ -9,6 +9,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [0.5.0] - 2026-10-07
 
+### Changed
+
+- Shell coverage is collected on macOS and Linux and gated once over the
+  merged reports (`make coverage` collects, `make coverage-gate` enforces the
+  80% floor over `coverage/shell-*.cobertura.xml`). Each platform skips the
+  other's runtime-sandbox tests, so a single report understated what the
+  suite exercises and the Linux-only gate had been failing since the
+  accounting work. The closed-descriptor engine launcher is excluded from the
+  measurement: it closes the descriptor kcov reports through and then execs
+  away, so no line inside can ever be observed, though the runtime suites
+  launch real engines through it.
+  Eight accounting tests that assert exact signal delivery skip under kcov
+  (its extra parent process changes which tree a group or pty signal
+  reaches); `make test` still runs them.
+
 ### Security
 
 - **The Claude credential copy no longer carries the refresh token.** The

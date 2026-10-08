@@ -1422,6 +1422,13 @@ run_engine_forwarding() {
 # child, so $! names the engine process itself and a forwarded signal reaches
 # the engine instead of an intermediary shell whose death would orphan the
 # chain behind it. It must therefore never be called in the foreground.
+# SCODE_COVERAGE_EXCLUDE_START
+# kcov cannot observe this launcher: it closes every inherited descriptor,
+# including the one kcov's bash tracing reports through, and then replaces
+# the shell with the engine chain. The suites exercise it end to end (the
+# runtime-sandbox and accounting tests launch real engines through it), but
+# no line inside ever reaches a coverage report, so it is excluded rather
+# than counted as untested.
 # shellcheck disable=SC2329  # handed to the runners as an argument and launched from run_engine_forwarding
 run_sandbox_engine_with_closed_fds() {
   # shellcheck disable=SC2016  # expanded by the fixed inner Bash, not this one
@@ -1649,6 +1656,7 @@ exec { \$ARGV[0] } @ARGV or die \"scode: engine exec failed: \$!\\n\";
     exec "$@"
   ' scode-fd-guard "$@"
 }
+# SCODE_COVERAGE_EXCLUDE_END
 
 # Check if arg is a known harness
 is_known_harness() {

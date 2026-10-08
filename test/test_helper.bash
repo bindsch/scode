@@ -129,6 +129,16 @@ require_runtime_sandbox() {
   [ "$status" -eq 0 ]
 }
 
+# Tests that assert exact signal delivery (a group INT on a pty, a QUIT
+# aimed at the run, a writer killed from outside) cannot run under kcov:
+# kcov sits between the test and scode as an extra parent process, so the
+# signal reaches a different process tree than the one the test set up.
+# These tests run in `make test`; `make coverage` skips them and says so.
+require_direct_signal_delivery() {
+  [[ -n "${SCODE_KCOV_BINARY:-}" ]] && skip "signal delivery is not faithful under kcov"
+  return 0
+}
+
 require_any_runtime_sandbox() {
   case "$(uname -s)" in
     Darwin)

@@ -40,6 +40,7 @@ past, and the tap is what users actually install from.
   ```bash
   make test
   make coverage
+  make coverage-gate   # CI gates the macOS and Linux reports merged; one platform alone may sit below the floor
   npm audit --audit-level=low
   ```
 

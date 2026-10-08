@@ -168,6 +168,7 @@ SWAPEOF
 
 @test "an accounting warning to a dead stderr reader cannot kill the exit trap" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   # An accounting diagnostic at write time lands on stderr. When the
   # reader on that pipe is already gone, the write dies by SIGPIPE, and
   # no || true catches a signal death. The write happens inside the
@@ -251,6 +252,7 @@ SWAPEOF
 
 @test "SIGQUIT during a run records the conventional exit code" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   local acct="$TEST_PROJECT/account.jsonl"
   # QUIT is fatal without special handling: the engine holds SIG_DFL for
   # it, and scode's own handler exits 131 so the record and the teardown
@@ -399,6 +401,7 @@ os.execve(sys.argv[1], sys.argv[1:], os.environ)
 
 @test "a terminal-group SIGINT is delivered once and the engine's status stands" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   [[ -x /usr/bin/python3 ]] || skip "/usr/bin/python3 is required"
   local acct="$TEST_PROJECT/account.jsonl"
   # A pty makes scode a session leader whose group is the terminal's
@@ -423,6 +426,7 @@ os.execve(sys.argv[1], sys.argv[1:], os.environ)
 
 @test "a SIGINT aimed at scode's pid on a pty is treated as a terminal-group signal" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   [[ -x /usr/bin/python3 ]] || skip "/usr/bin/python3 is required"
   local acct="$TEST_PROJECT/account.jsonl"
   # On a pty, scode's group is the foreground group, so a pid-directed INT
@@ -447,6 +451,7 @@ os.execve(sys.argv[1], sys.argv[1:], os.environ)
 
 @test "a terminal-group SIGINT reaches a handler that continues exactly once" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   [[ -x /usr/bin/python3 ]] || skip "/usr/bin/python3 is required"
   local acct="$TEST_PROJECT/account.jsonl"
   # One ^C must be one delivery even when the engine stays alive: this
@@ -471,6 +476,7 @@ os.execve(sys.argv[1], sys.argv[1:], os.environ)
 
 @test "a terminal-group SIGTERM reaches a handler that continues exactly once" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   [[ -x /usr/bin/python3 ]] || skip "/usr/bin/python3 is required"
   local acct="$TEST_PROJECT/account.jsonl"
   # A group TERM cannot be typed on a terminal, so the harness signals
@@ -611,6 +617,7 @@ os.execve(sys.argv[1], sys.argv[1:], os.environ)
 
 @test "a terminal-group SIGINT on the --log path reaches the engine exactly once" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   [[ -x /usr/bin/python3 ]] || skip "/usr/bin/python3 is required"
   local acct="$TEST_PROJECT/account.jsonl"
   # The --log path launches the same launcher function -- it is the
@@ -708,6 +715,7 @@ print("QUIT:", signal.getsignal(signal.SIGQUIT))'
 
 @test "a log writer killed from outside is reported" {
   require_runtime_sandbox
+  require_direct_signal_delivery
   local acct="$TEST_PROJECT/account.jsonl"
   local logf="$TEST_PROJECT/run.log"
   # The engine outlives the writer and exits 0 on its own, and this run

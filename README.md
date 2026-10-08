@@ -844,7 +844,8 @@ Open an issue or PR on [GitHub](https://github.com/bindsch/scode). This is beta 
 brew install bats-core shellcheck node kcov   # use Node.js 22+; install equivalents on Linux
 npm ci
 make test                                 # runs shellcheck + JS tests + bats
-make coverage                             # enforces >=80% shell and JS coverage
+make coverage                             # collects this platform's reports; enforces >=80% JS coverage
+make coverage-gate                        # enforces >=80% shell coverage over the collected reports (CI merges macOS + Linux)
 ```
 
 `make test` runs `shellcheck scode`, `make test-js`, then the full `bats` suite. You can also run them separately:

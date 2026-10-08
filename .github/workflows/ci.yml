@@ -44,9 +44,13 @@ jobs:
       - run: make test
 
   coverage:
-    name: Coverage
-    runs-on: ubuntu-24.04
+    name: Coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -55,16 +59,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: sudo apt-get update && sudo apt-get install -y bats bubblewrap shellcheck
+      - name: Install system test tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bats-core shellcheck kcov
+      - name: Install system test tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bats bubblewrap shellcheck
       # See the test job: without this, bubblewrap cannot start and every
       # runtime-sandbox test skips, which drags measured coverage down.
       - name: Allow unprivileged user namespaces
+        if: runner.os == 'Linux'
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --ro-bind / / --dev /dev --proc /proc -- /bin/true && echo "bubblewrap works"
       # Ubuntu 24.04 dropped the kcov package, so build the pinned release from
       # source. Keep KCOV_REF on a tag: the shell coverage gate depends on it.
-      - name: Install kcov
+      - name: Install kcov (Linux)
+        if: runner.os == 'Linux'
         env:
           KCOV_REF: v43
         run: |
@@ -79,4 +90,33 @@ jobs:
           sudo cmake --install "$RUNNER_TEMP/kcov/build"
           kcov --version
       - run: npm ci
+      # Collects this platform's report; the shell floor is enforced once over
+      # both platforms' reports in coverage-gate (each skips the other's
+      # runtime-sandbox tests, so a single report understates the suite).
       - run: make coverage
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: shell-coverage-${{ matrix.os }}
+          path: coverage/shell-*.cobertura.xml*
+          if-no-files-found: error
+          retention-days: 7
+
+  coverage-gate:
+    name: Coverage gate (macOS + Linux merged)
+    runs-on: ubuntu-24.04
+    needs: coverage
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: shell-coverage-*
+          path: coverage
+          merge-multiple: true
+      - run: ls -l coverage
+      - run: make coverage-gate
