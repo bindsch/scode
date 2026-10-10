@@ -54,7 +54,7 @@ brew install bindsch/tap/scode
 ### From source
 
 ```bash
-EXPECTED_COMMIT="de663506fbeaa7e3d8448dc12e685c69c6b8df82" # v0.5.0
+EXPECTED_COMMIT="21688369d239c0b6eeaf0abb238be3f7726f53d6" # v0.6.0
 git clone --filter=blob:none https://github.com/bindsch/scode.git
 cd scode
 git checkout --detach "$EXPECTED_COMMIT"
@@ -86,14 +86,14 @@ make uninstall PREFIX="$HOME/.local"
 ### Manual
 
 ```bash
-COMMIT="de663506fbeaa7e3d8448dc12e685c69c6b8df82" # v0.5.0
+COMMIT="21688369d239c0b6eeaf0abb238be3f7726f53d6" # v0.6.0
 tmp="$(mktemp -d)"
 base="https://raw.githubusercontent.com/bindsch/scode/${COMMIT}"
 curl -fsSLo "$tmp/scode" "$base/scode"
 curl -fsSLo "$tmp/no-sandbox.js" "$base/lib/no-sandbox.js"
 curl -fsSLo "$tmp/LICENSE" "$base/LICENSE"
 (cd "$tmp" && printf '%s  %s\n' \
-  f154acaede6241838d23540235f30c860812c963edaa2edd6d711f12d2638e10 scode \
+  8e3217690a4a218494e9327bb714e7da29b404194e798ad50864074c057e4ba2 scode \
   131cb3edc4e5149de8a3ad619824d1b99b8f35b053d0031e6aa46b286a56b944 no-sandbox.js \
   60e0aac1186a0ea1be7c13e1cc7a8475100fae5572abc23bbad33e3cdfa726dd LICENSE \
   | shasum -a 256 -c -)
