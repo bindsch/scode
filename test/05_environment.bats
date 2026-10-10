@@ -164,6 +164,22 @@ load test_helper
   [[ "$output" != *"not a known harness"* ]]
 }
 
+# A stub on PATH stands in for harnesses the test host may not have
+# installed; scode resolves the command through the caller's PATH.
+make_stub_harness() {
+  local stub_dir="$TEST_PROJECT/stub-bin"
+  mkdir -p "$stub_dir"
+  printf '#!/bin/sh\nexit 0\n' > "$stub_dir/$1"
+  chmod +x "$stub_dir/$1"
+}
+
+@test "agy shortcut produces no warning" {
+  make_stub_harness agy
+  PATH="$TEST_PROJECT/stub-bin:$PATH" run "$SCODE" --dry-run -C "$TEST_PROJECT" agy
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"not a known harness"* ]]
+}
+
 @test "unknown command warns about untested harness" {
   run "$SCODE" --dry-run -C "$TEST_PROJECT" -- ls
   [ "$status" -eq 0 ]
@@ -384,6 +400,219 @@ load test_helper
   unset CARGO_REGISTRY_TOKEN BASH_ENV NODE_OPTIONS GIT_CONFIG_COUNT
 }
 
+@test "--scrub-env removes routed-provider and harness credential vars" {
+  export ZAI_API_KEY="zai"
+  export ZHIPU_API_KEY="zhipu"
+  export MOONSHOT_API_KEY="moonshot"
+  export KIMI_API_KEY="kimi"
+  export KIMI_MODEL_API_KEY="kimi-model"
+  export DASHSCOPE_API_KEY="dashscope"
+  export QWEN_API_KEY="qwen"
+  export ANTHROPIC_AUTH_TOKEN="anthropic-auth"
+  export CLAUDE_CODE_OAUTH_TOKEN="claude-oauth"
+  export CODEX_API_KEY="codex"
+  export COPILOT_GITHUB_TOKEN="copilot-gh"
+  export CURSOR_API_KEY="cursor"
+  export FACTORY_API_KEY="factory"
+  run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"scrubbed env vars"* ]]
+  [[ "$output" == *"ZAI_API_KEY"* ]]
+  [[ "$output" == *"ZHIPU_API_KEY"* ]]
+  [[ "$output" == *"MOONSHOT_API_KEY"* ]]
+  [[ "$output" == *"KIMI_API_KEY"* ]]
+  [[ "$output" == *"KIMI_MODEL_API_KEY"* ]]
+  [[ "$output" == *"DASHSCOPE_API_KEY"* ]]
+  [[ "$output" == *"QWEN_API_KEY"* ]]
+  [[ "$output" == *"ANTHROPIC_AUTH_TOKEN"* ]]
+  [[ "$output" == *"CLAUDE_CODE_OAUTH_TOKEN"* ]]
+  [[ "$output" == *"CODEX_API_KEY"* ]]
+  [[ "$output" == *"COPILOT_GITHUB_TOKEN"* ]]
+  [[ "$output" == *"CURSOR_API_KEY"* ]]
+  [[ "$output" == *"FACTORY_API_KEY"* ]]
+  unset ZAI_API_KEY ZHIPU_API_KEY MOONSHOT_API_KEY KIMI_API_KEY KIMI_MODEL_API_KEY \
+    DASHSCOPE_API_KEY QWEN_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN \
+    CODEX_API_KEY COPILOT_GITHUB_TOKEN CURSOR_API_KEY FACTORY_API_KEY
+}
+
+@test "--scrub-env leaves provider configuration variables alone" {
+  # Configuration, not credentials: the channels provider overrides use to
+  # point a harness at a gateway, plus a synthetic marker standing in for any
+  # non-credential value. Only credential-bearing names are scrubbed (covered
+  # by the scrub tests above); a test must never assert that a name ending in
+  # API_KEY survives the scrub.
+  export OPENAI_API_BASE="https://gw.example/v1"
+  export LLM_BASE_URL="https://gw.example/v1"
+  export LLM_MODEL="glm-5.3"
+  export GOOSE_PROVIDER="openai"
+  export GOOSE_MODEL="glm-5.3"
+  export KIMI_MODEL_BASE_URL="https://gw.example/v1"
+  export KIMI_MODEL_MAX_COMPLETION_TOKENS="4096"
+  export PI_CODING_AGENT_DIR="$TEST_PROJECT/pi-agent"
+  export OPENCODE_CONFIG="$TEST_PROJECT/opencode.json"
+  export CURSOR_API_ENDPOINT="https://gw.example"
+  export ANTHROPIC_BASE_URL="https://gw.example"
+  export SCRUB_BOUNDARY_MARKER="not-a-credential"
+  run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"OPENAI_API_BASE"* ]]
+  [[ "$output" != *"LLM_BASE_URL"* ]]
+  [[ "$output" != *"LLM_MODEL"* ]]
+  [[ "$output" != *"GOOSE_PROVIDER"* ]]
+  [[ "$output" != *"GOOSE_MODEL"* ]]
+  [[ "$output" != *"KIMI_MODEL_BASE_URL"* ]]
+  [[ "$output" != *"KIMI_MODEL_MAX_COMPLETION_TOKENS"* ]]
+  [[ "$output" != *"PI_CODING_AGENT_DIR"* ]]
+  [[ "$output" != *"OPENCODE_CONFIG"* ]]
+  [[ "$output" != *"CURSOR_API_ENDPOINT"* ]]
+  [[ "$output" != *"ANTHROPIC_BASE_URL"* ]]
+  [[ "$output" != *"SCRUB_BOUNDARY_MARKER"* ]]
+  unset OPENAI_API_BASE LLM_BASE_URL LLM_MODEL GOOSE_PROVIDER GOOSE_MODEL \
+    KIMI_MODEL_BASE_URL KIMI_MODEL_MAX_COMPLETION_TOKENS PI_CODING_AGENT_DIR \
+    OPENCODE_CONFIG CURSOR_API_ENDPOINT ANTHROPIC_BASE_URL SCRUB_BOUNDARY_MARKER
+}
+
+@test "--scrub-env does not scrub codemux override control variables" {
+  # CODEMUX_*_PROVIDER_* routing settings are how codemux points a run at an
+  # endpoint; scrubbing them would cut the sandboxed child off from the
+  # override codemux configured for it. Only the non-credential routing names
+  # are asserted here; credential names belong to the scrub tests.
+  export CODEMUX_AIDER_PROVIDER_BASE_URL="https://gw.example/v1"
+  export CODEMUX_KIMI_PROVIDER_MODEL="glm-5.3"
+  run "$SCODE" --dry-run --scrub-env -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"CODEMUX_AIDER_PROVIDER_BASE_URL"* ]]
+  [[ "$output" != *"CODEMUX_KIMI_PROVIDER_MODEL"* ]]
+  unset CODEMUX_AIDER_PROVIDER_BASE_URL CODEMUX_KIMI_PROVIDER_MODEL
+}
+
+# ---------- --keep-env ----------
+
+@test "--keep-env exempts a name from the scrub in the child environment" {
+  require_runtime_sandbox
+  # stdout alone: stderr carries scode's own warnings (unknown harness, the
+  # list of scrubbed names on this host), which must not fold into the value.
+  ZAI_API_KEY="kept-value" run --separate-stderr "$SCODE" --scrub-env --keep-env ZAI_API_KEY \
+    -C "$TEST_PROJECT" -- printenv ZAI_API_KEY
+  [ "$status" -eq 0 ]
+  [[ "$output" == "kept-value" ]]
+}
+
+@test "--keep-env exempts only the named names" {
+  require_runtime_sandbox
+  ZAI_API_KEY="a" QWEN_API_KEY="b" OPENAI_API_KEY="c" run \
+    "$SCODE" --scrub-env --keep-env ZAI_API_KEY,QWEN_API_KEY \
+    -C "$TEST_PROJECT" -- env
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ZAI_API_KEY=a"* ]]
+  [[ "$output" == *"QWEN_API_KEY=b"* ]]
+  [[ "$output" != *"OPENAI_API_KEY=c"* ]]
+}
+
+@test "--keep-env is repeatable and deduplicates" {
+  run "$SCODE" --dry-run --scrub-env --keep-env ZAI_API_KEY --keep-env ZAI_API_KEY \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--keep-env: ZAI_API_KEY"* ]]
+  [[ "$(echo "$output" | grep -c 'keep-env:')" -eq 1 ]]
+}
+
+@test "--keep-env refuses names containing =" {
+  run "$SCODE" --dry-run --scrub-env --keep-env "ZAI_API_KEY=secret" \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --keep-env name"* ]]
+}
+
+@test "--keep-env refuses names containing whitespace" {
+  run "$SCODE" --dry-run --scrub-env --keep-env "ZAI API_KEY" \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --keep-env name"* ]]
+}
+
+@test "--keep-env refuses empty list entries" {
+  # Middle, trailing, and leading commas are all empty entries. The trailing
+  # case regressed first: field splitting dropped it, so `NAME,` was accepted.
+  local raw
+  for raw in "ZAI_API_KEY,," "ZAI_API_KEY," ",ZAI_API_KEY" ","; do
+    run "$SCODE" --dry-run --scrub-env --keep-env "$raw" \
+      -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"invalid --keep-env list: empty entry"* ]]
+  done
+}
+
+@test "--keep-env never expands glob patterns against the working directory" {
+  # `AWS_*` is not a variable name. If the split went through pathname
+  # expansion, a file named AWS_notes in the working directory would replace
+  # the pattern and silently exempt a variable nobody named.
+  local glob_dir="$TEST_PROJECT/keep-env-glob"
+  mkdir -p "$glob_dir"
+  touch "$glob_dir/AWS_notes"
+  cd "$glob_dir"
+  run "$SCODE" --dry-run --scrub-env --keep-env 'AWS_*' \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"invalid --keep-env name"* ]]
+}
+
+@test "--keep-env refuses startup-injection and loader names" {
+  # The scrub removes these because they inject code or configuration into
+  # every child process; keep-env is for credentials a launcher injects on
+  # purpose, so they can never be exempted. The error prints the refused set.
+  local name
+  for name in NODE_OPTIONS BASH_ENV ENV ZDOTDIR PYTHONPATH PYTHONHOME RUBYOPT \
+              PERL5OPT PERL5LIB PERLLIB JAVA_TOOL_OPTIONS _JAVA_OPTIONS \
+              LD_PRELOAD DYLD_INSERT_LIBRARIES GIT_CONFIG_GLOBAL GIT_ASKPASS \
+              SSH_AUTH_SOCK; do
+    run "$SCODE" --dry-run --scrub-env --keep-env "$name" \
+      -C "$TEST_PROJECT" -- true
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--keep-env refuses '${name}'"* ]]
+    [[ "$output" == *"refused names and prefixes: LD_"* ]]
+  done
+}
+
+@test "--keep-env missing argument fails" {
+  run "$SCODE" --dry-run --scrub-env --keep-env
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"missing argument"* ]]
+}
+
+@test "--keep-env prints kept names in dry-run output" {
+  run "$SCODE" --dry-run --scrub-env --keep-env ZAI_API_KEY,QWEN_API_KEY \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--keep-env: ZAI_API_KEY QWEN_API_KEY"* ]]
+}
+
+@test "--keep-env dry-run prints names only, never values" {
+  ZAI_API_KEY="secret-value" run "$SCODE" --dry-run --scrub-env \
+    --keep-env ZAI_API_KEY -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--keep-env: ZAI_API_KEY"* ]]
+  [[ "$output" != *"secret-value"* ]]
+}
+
+@test "--keep-env without --scrub-env warns that it has no effect" {
+  run "$SCODE" --dry-run --keep-env ZAI_API_KEY -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--keep-env has no effect without --scrub-env"* ]]
+}
+
+@test "--keep-env no-effect warning stays silent when config enables scrub" {
+  local user_config
+  user_config="$(mktemp)"
+  printf 'scrub_env: true\n' > "$user_config"
+  run "$SCODE" --dry-run --config "$user_config" --keep-env ZAI_API_KEY \
+    -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"has no effect without --scrub-env"* ]]
+  [[ "$output" == *"scrub-env active"* ]]
+  rm -f "$user_config"
+}
+
 @test "grok defense pins collection controls even for nested launches" {
   local config_file="$TEST_PROJECT/grok-defense-env.yaml"
   cat > "$config_file" <<'YAML'
@@ -414,4 +643,23 @@ YAML
   [ -f "$log_file" ]
   # Verify timestamp format is YYYY-MM-DDTHH:MM:SS
   grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}' "$log_file"
+}
+
+@test "--scrub-env strips LLM_API_KEY and --keep-env keeps it (review sc4)" {
+  require_runtime_sandbox
+  LLM_API_KEY="secret-marker" run --separate-stderr "$SCODE" --scrub-env \
+    -C "$TEST_PROJECT" -- sh -c 'printf "%s" "${LLM_API_KEY:-unset}"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "unset" ]]
+  LLM_API_KEY="secret-marker" run --separate-stderr "$SCODE" --scrub-env --keep-env LLM_API_KEY \
+    -C "$TEST_PROJECT" -- sh -c 'printf "%s" "${LLM_API_KEY:-unset}"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == "secret-marker" ]]
+}
+
+@test "--keep-env refusal lists the refused names separated by spaces (review sc4)" {
+  run "$SCODE" --scrub-env --keep-env NODE_OPTIONS -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refused names and prefixes:"* ]]
+  [[ "$output" != *"refused names and prefixes:"*","* ]]
 }

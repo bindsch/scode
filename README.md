@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.5.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
+> **Beta software (v0.6.0).** This is under active development. Defaults may change, features may break, and sandbox coverage is not guaranteed to be complete. Use at your own risk. Pull requests welcome.
 
 scode wraps AI coding tools (Claude, Codex, Aider, Grok, OpenCode, etc.) in an OS-level sandbox that prevents them from reading or modifying personal files, credentials, and sensitive directories. One policy, all agents, zero infrastructure.
 
@@ -28,7 +28,7 @@ AI coding CLIs are starting to ship built-in sandboxes. A few third-party wrappe
 
 **Zero infrastructure.** Single bash script. No daemon, no proxy, no container, no language runtime for the core wrapper. Uses the system sandbox on tested macOS versions or `bubblewrap` on tested Debian/Ubuntu releases.
 
-**Batteries included.** Blocks SSH and signing keys, cloud/container/IaC credentials, package tokens, password managers, personal media, and shell histories by default. Chromium double-sandbox issues are handled automatically. Environment scrubbing covers cloud, AI, CI/CD, package, SSH-agent, and process-injection variables.
+**Batteries included.** Blocks SSH and signing keys, cloud/container/IaC credentials, package tokens, password managers, personal media, and shell histories by default. Chromium double-sandbox issues are handled automatically. Environment scrubbing covers cloud, AI, subscription and routed-provider, CI/CD, package, SSH-agent, and process-injection variables.
 
 **YOLO mode safety net.** Running with `--dangerously-skip-permissions` or auto-accepting tool calls? scode still enforces its filesystem and network boundary in the kernel. This limits access to protected host data, but the harness can still damage a writable project or exfiltrate any readable project data while network access is enabled.
 
@@ -140,6 +140,7 @@ If no command is provided, `scode` defaults to `opencode`.
 | `--trust LEVEL` | Named trust preset: `trusted`, `standard`, `untrusted` (singleton) |
 | `--config FILE` | Use a specific config file (default: `~/.config/scode/sandbox.yaml`; singleton) |
 | `--scrub-env` | Strip API keys and tokens from environment |
+| `--keep-env NAME[,NAME...]` | Exempt named variables from `--scrub-env` (repeatable; exact names, no patterns; startup-injection and loader names are refused) |
 | `--log FILE` | Log sandbox violations to the specified file (creates parent directories if needed; singleton) |
 | `--dry-run` | Print sandbox profile without executing |
 | `audit --watch`, `audit -w` | Tail an audit log and print new denials in real time |
@@ -163,6 +164,7 @@ scode --strict claude              # deny-default; ~/.claude stays readable and 
 scode --trust untrusted codex      # maximum lockdown; no harness-state auto-allow
 scode --trust trusted gemini       # minimal sandbox (rw, net on)
 scode --scrub-env claude           # strip API keys from env
+scode --scrub-env --keep-env ZAI_API_KEY claude  # scrub, but pass one named credential through
 scode --config examples/sandbox-paranoid.yaml opencode  # use a specific config
 scode --log session.log codex      # log denials for review
 scode audit session.log            # parse denials, suggest --allow flags
@@ -183,6 +185,7 @@ auto-allows their default user config and state paths **read-write**. The
 | Codex CLI | `codex` | `~/.codex` |
 | Goose | `goose` | `~/.config/goose` |
 | Gemini CLI | `gemini` | `~/.gemini` |
+| Antigravity CLI | `agy` | `~/.gemini` (shares the Gemini CLI root) |
 | Factory Droid | `droid` | `~/.factory` |
 | Qwen Code | `qwen` | `~/.qwen` |
 | Codemux | `codemux` | `~/.codemux`, `~/.config/codemux` (legacy) |
@@ -191,7 +194,7 @@ auto-allows their default user config and state paths **read-write**. The
 | Amp | `amp` | `~/.config/amp`, `~/.amp` |
 | Crush | `crush` | `~/.config/crush`, `~/.local/share/crush` |
 | Cursor Agent | `cursor-agent` | `~/.cursor` |
-| GitHub Copilot CLI | `copilot` | `~/.copilot`, `~/.cache/copilot` (Linux) |
+| GitHub Copilot CLI | `copilot` | `~/.copilot`, `~/.cache/copilot` |
 | Continue CLI | `cn` | `~/.continue` |
 | Kimi Code CLI | `kimi` | `~/.kimi-code`, `~/.kimi` (legacy) |
 | OpenHands CLI | `openhands` | `~/.openhands` |
@@ -204,6 +207,19 @@ If a harness is configured to use a custom user directory, add that path with
 `--allow` when using strict mode. Environment-controlled roots such as `GROK_HOME`
 are deliberately not auto-allowed because a hostile value such as `/` would
 collapse the strict boundary.
+
+The Copilot cache entry `~/.cache/copilot` applies on every platform: the
+Copilot CLI consults it as its XDG fallback in the same candidate list as the
+platform cache. On macOS its primary cache is `~/Library/Caches/copilot`, which
+stays blocked with the rest of `~/Library`.
+
+The Cursor Agent also installs an `agent` alias, but that name is not
+recognized: it is too generic (any repository can ship a script called
+`agent`), and the launcher's own name — `cursor-agent` — already is. codemux
+0.12.0 launches the Cursor Agent as `cursor-agent`, the real launcher name
+present in every install beside the `agent` symlink, so those runs keep the
+auto-allow. A bare `agent` command stays unknown: it warns and strict mode
+does not auto-allow `~/.cursor`.
 
 Unknown commands still run but produce a warning that sandbox behavior has not been tested.
 
@@ -553,10 +569,26 @@ When enabled, strips sensitive environment families before the command runs (not
 
 - cloud and infrastructure credentials (`AWS_*`, `AZURE_*`, Google/OCI/DigitalOcean, Kubernetes, Vault, Pulumi, Terraform/TFC, Cloudflare);
 - AI provider keys (OpenAI, Anthropic, xAI, Gemini, OpenRouter, Hugging Face, Cohere, Mistral, and others);
+- subscription and routed-provider credentials — the names the current routing stack actually reads: `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`, `ZAI_API_KEY`, `ZHIPU_API_KEY`, `MOONSHOT_API_KEY`, `KIMI_API_KEY`, `KIMI_MODEL_API_KEY`, `DASHSCOPE_API_KEY`, `QWEN_API_KEY`, `COPILOT_GITHUB_TOKEN`, `CURSOR_API_KEY`, `FACTORY_API_KEY`;
 - VCS, CI/CD, deployment, package-registry, Docker, database URL, and SSH-agent credentials;
 - process/startup injection controls such as `BASH_ENV`, `ENV`, `ZDOTDIR`, `LD_*`, `DYLD_*`, `NODE_OPTIONS`, Python/Ruby/Perl/Java startup options, and Git config/askpass overrides.
 
+Provider configuration is not scrubbed: base URLs, model names, and the channels a launcher uses to deliver an override (`OPENAI_API_BASE`, `LLM_BASE_URL`/`LLM_MODEL`, `GOOSE_PROVIDER`/`GOOSE_MODEL`, `KIMI_MODEL_*` other than the key, `PI_CODING_AGENT_DIR`, `OPENCODE_CONFIG`, `CURSOR_API_ENDPOINT`, `ANTHROPIC_BASE_URL`) are how a run is pointed at an endpoint, not ambient secrets. `CODEMUX_*` control variables are likewise left alone: they route a codemux run. One of them is credential-shaped — `CODEMUX_CODEX_PROVIDER_API_KEY` carries the Codex override API key and does pass through `--scrub-env`, because scrubbing the family would cut a sandboxed codex off from the override codemux configured; export it only for the runs that need it. `LLM_API_KEY` is a credential and is scrubbed; a launcher that injects it for an override keeps it with `--keep-env LLM_API_KEY`.
+
 The exact patterns are maintained in `SCRUB_PATTERNS` in the `scode` script. Grok defense turns scrubbing on automatically for a detected Grok command.
+
+### `--keep-env`
+
+An outer launcher that has already authenticated may need to deliver exactly one named credential through an otherwise scrubbed environment (codemux's provider overrides do this). `--keep-env` exempts exact variable names from the scrub:
+
+```bash
+scode --scrub-env --keep-env ANTHROPIC_AUTH_TOKEN claude
+scode --scrub-env --keep-env KIMI_MODEL_API_KEY,ZAI_API_KEY kimi
+```
+
+Names are exact — no glob patterns, and a glob-looking entry is never expanded against the working directory; it is refused as a name. Under Grok defense `--keep-env` is refused outright: that scrub cannot be relaxed for a Grok command. A name containing `=` or whitespace is refused, as is an empty list entry (leading, middle, or trailing); the flag is repeatable and deduplicates. Kept names (never their values) are printed under `--dry-run`. Passing `--keep-env` without any source of `--scrub-env` (flag, config, or Grok defense) prints a warning, since nothing is being scrubbed.
+
+The exemption can only ever name a credential. Startup-injection and loader variables are refused outright, because they can carry code or helper programs into every child process: `LD_*`, `DYLD_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`, `ZDOTDIR`, `PYTHONPATH`, `PYTHONHOME`, `RUBYOPT`, `PERL5OPT`, `PERL5LIB`, `PERLLIB`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `GIT_CONFIG_*`, `GIT_ASKPASS`, `SSH_*`. The refusal error prints this set.
 
 ## `scode audit`
 

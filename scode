@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.5.0"
+readonly PROGRAM_VERSION="0.6.0"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -60,9 +60,13 @@ CONFIG_FILE_EXPLICIT=0
 # not report individual multiline array entries as executed. Their behavior is
 # covered through the generated-policy and environment-scrubbing tests.
 # SCODE_COVERAGE_EXCLUDE_START
-# Known harnesses (for shortcut detection)
+# Known harnesses (for shortcut detection). `agy` is Google's Antigravity CLI,
+# which shares the Gemini CLI root. The Cursor Agent's alias `agent` is
+# deliberately absent: the name is too generic (any repository can ship a
+# script called agent), and the launcher's own name — cursor-agent, the name
+# codemux launches it under — is already listed.
 readonly KNOWN_HARNESSES=(
-  opencode claude codex goose gemini droid qwen codemux pi
+  opencode claude codex goose gemini agy droid qwen codemux pi
   aider amp crush cursor-agent copilot cn kimi
   openhands cline kiro-cli auggie grok
 )
@@ -217,6 +221,36 @@ SCRUB_PATTERNS=(
   "DEEPSEEK_API_KEY"
   "CEREBRAS_API_KEY"
   "FAL_KEY"
+
+  # Subscription and routed-provider credentials the current stack actually
+  # uses (codemux adapters and provider overrides deliver some of these to the
+  # sandboxed child; a caller that needs one through --scrub-env exempts it
+  # with --keep-env). The CODEMUX_* control variables are deliberately absent:
+  # they are how codemux routes a run, not ambient credentials. One of them is
+  # credential-shaped — CODEMUX_CODEX_PROVIDER_API_KEY carries the Codex
+  # override API key and does pass through --scrub-env; removing the family
+  # would cut sandboxed codex off from the override codemux configured (the
+  # trade-off is recorded in docs/align-0.6-report.md section 2, and the
+  # caller controls it by exporting the override only for runs that need it).
+  # Provider configuration such as OPENAI_API_BASE, LLM_BASE_URL, LLM_MODEL,
+  # GOOSE_PROVIDER, KIMI_MODEL_* (other than the key), PI_CODING_AGENT_DIR,
+  # and OPENCODE_CONFIG is configuration, not a credential, and stays.
+  # LLM_API_KEY is a credential (review sc4): scrubbed like the others; a
+  # launcher that injects it for an override keeps it with --keep-env.
+  "ANTHROPIC_AUTH_TOKEN"
+  "CLAUDE_CODE_OAUTH_TOKEN"
+  "CODEX_API_KEY"
+  "ZAI_API_KEY"
+  "ZHIPU_API_KEY"
+  "MOONSHOT_API_KEY"
+  "KIMI_API_KEY"
+  "KIMI_MODEL_API_KEY"
+  "LLM_API_KEY"
+  "DASHSCOPE_API_KEY"
+  "QWEN_API_KEY"
+  "COPILOT_GITHUB_TOKEN"
+  "CURSOR_API_KEY"
+  "FACTORY_API_KEY"
 
   # VCS / CI / CD
   "GITHUB_TOKEN"
@@ -556,6 +590,8 @@ Options:
   --trust LEVEL       Named trust preset: trusted, standard, untrusted (singleton)
   --config FILE       Use FILE as config (default: ~/.config/scode/sandbox.yaml; singleton)
   --scrub-env         Scrub sensitive env vars (API keys, tokens) before exec
+  --keep-env NAMES    Exempt comma-separated env var names from --scrub-env
+                      (repeatable; names only, no patterns)
   --no-credential-sync
                       Do not copy Claude Code's Keychain credential to
                       ~/.claude/.credentials.json (sandboxed claude cannot
@@ -574,6 +610,11 @@ EOF
   local harness_list
   harness_list="$(printf '%s, ' "${KNOWN_HARNESSES[@]}")"
   echo "  ${harness_list%, }"
+  echo ""
+  echo "  The bare name 'agent' (a Cursor Agent alias) is not recognized:"
+  echo "  the name is too generic, and the launcher's own name is"
+  echo "  cursor-agent — the name codemux launches it under. An 'agent'"
+  echo "  command stays unknown and warns."
   cat <<'EOF'
 
 Default Protections:
@@ -1970,41 +2011,12 @@ _detect_harness_from_shell_words() {
   return 1
 }
 
-# Detect harness from COMMAND. Checks direct/wrapper forms, and shell wrappers
-# (bash/sh/zsh -c "...") so strict auto-allow works for common launch patterns.
+# Detect harness from COMMAND: direct/wrapper forms and shell wrappers
+# (bash/sh/zsh -c "...") so strict auto-allow works for common launch
+# patterns. The whole walk lives in _detect_harness_from_args, which
+# recurses into shell -c strings itself.
 detect_harness() {
-  if _detect_harness_from_args "${COMMAND[@]}"; then
-    return 0
-  fi
-
-  local base="${COMMAND[0]##*/}"
-  case "$base" in
-    sh|bash|zsh|dash|ksh)
-      local i
-      for (( i=1; i<${#COMMAND[@]}; i++ )); do
-        local tok="${COMMAND[$i]}"
-        # Shell command string flag forms: -c, -lc, -ic, etc.
-        if [[ "$tok" =~ ^-[A-Za-z]*c[A-Za-z]*$ ]]; then
-          local cmd_idx=$((i + 1))
-          # Skip optional -- between -c and the command string
-          if [[ "$cmd_idx" -lt ${#COMMAND[@]} && "${COMMAND[$cmd_idx]}" == "--" ]]; then
-            (( cmd_idx++ ))
-          fi
-          [[ "$cmd_idx" -ge ${#COMMAND[@]} ]] && break
-          local shell_cmd="${COMMAND[$cmd_idx]}"
-          _shell_split_words "$shell_cmd"
-          if [[ ${#SHELL_SPLIT_WORDS[@]} -gt 0 ]]; then
-            if _detect_harness_from_shell_words "${SHELL_SPLIT_WORDS[@]}"; then
-              return 0
-            fi
-          fi
-          break
-        fi
-      done
-      ;;
-  esac
-
-  return 1
+  _detect_harness_from_args "${COMMAND[@]}"
 }
 
 # Populate HARNESS_CONFIG_PATHS with a harness's default user config/state paths.
@@ -2016,6 +2028,13 @@ get_harness_config_paths() {
     codex)        HARNESS_CONFIG_PATHS=("$HOME/.codex") ;;
     goose)        HARNESS_CONFIG_PATHS=("$HOME/.config/goose") ;;
     gemini)       HARNESS_CONFIG_PATHS=("$HOME/.gemini") ;;
+    # Antigravity shares the Gemini CLI root: the binary's own strings and the
+    # live tree put its settings and cache under ~/.gemini/antigravity-cli,
+    # shared config under ~/.gemini/config, and root-level files
+    # (GEMINI.md, AGENTS.md, projects.json) beside them, so the whole root is
+    # the unit to allow — allowing only the two subdirectories would miss the
+    # root-level state it reads and writes.
+    agy)          HARNESS_CONFIG_PATHS=("$HOME/.gemini") ;;
     droid)        HARNESS_CONFIG_PATHS=("$HOME/.factory") ;;
     qwen)         HARNESS_CONFIG_PATHS=("$HOME/.qwen") ;;
     codemux)      HARNESS_CONFIG_PATHS=("$HOME/.codemux" "$HOME/.config/codemux") ;;
@@ -2024,6 +2043,10 @@ get_harness_config_paths() {
     amp)          HARNESS_CONFIG_PATHS=("$HOME/.config/amp" "$HOME/.amp") ;;
     crush)        HARNESS_CONFIG_PATHS=("$HOME/.config/crush" "$HOME/.local/share/crush") ;;
     cursor-agent) HARNESS_CONFIG_PATHS=("$HOME/.cursor") ;;
+    # ~/.cache/copilot applies on every platform: the Copilot CLI consults it
+    # as its XDG fallback in the same candidate list as the platform cache
+    # (macOS primary: ~/Library/Caches/copilot, which stays blocked with the
+    # rest of ~/Library).
     copilot)      HARNESS_CONFIG_PATHS=("$HOME/.copilot" "$HOME/.cache/copilot") ;;
     cn)           HARNESS_CONFIG_PATHS=("$HOME/.continue") ;;
     kimi)         HARNESS_CONFIG_PATHS=("$HOME/.kimi-code" "$HOME/.kimi") ;;
@@ -2342,12 +2365,90 @@ is_cli_allowed() {
   is_allowed_in_list "$1" "${RESOLVED_CLI_ALLOWED[@]}"
 }
 
+# Names --keep-env must never exempt. The scrub removes them precisely
+# because they smuggle code or configuration into every child process:
+# dynamic loaders (LD_*, DYLD_*), shell and interpreter startup (NODE_OPTIONS,
+# BASH_ENV, ENV, ZDOTDIR, PYTHONPATH, PYTHONHOME, RUBYOPT, PERL5OPT, PERL5LIB,
+# PERLLIB, JAVA_TOOL_OPTIONS, _JAVA_OPTIONS), and Git/SSH helper programs
+# (GIT_CONFIG_*, GIT_ASKPASS, SSH_*). keep-env exists for credentials a
+# launcher injects on purpose, never for these.
+# SCODE_COVERAGE_EXCLUDE_START
+readonly KEEP_ENV_REFUSED=(
+  "LD_*" "DYLD_*"
+  "NODE_OPTIONS" "BASH_ENV" "ENV" "ZDOTDIR"
+  "PYTHONPATH" "PYTHONHOME" "RUBYOPT"
+  "PERL5OPT" "PERL5LIB" "PERLLIB"
+  "JAVA_TOOL_OPTIONS" "_JAVA_OPTIONS"
+  "GIT_CONFIG_*" "GIT_ASKPASS"
+  "SSH_*"
+)
+# SCODE_COVERAGE_EXCLUDE_END
+
+# Split a comma-separated --keep-env list into KEEP_ENV_NAMES, refusing
+# anything that is not a bare environment variable name. '=' would smuggle an
+# assignment and whitespace would smuggle a second name; characters outside
+# [A-Za-z0-9_] cannot name an exported variable, so they are refused the same
+# way. Names are exact — no glob patterns, unlike SCRUB_PATTERNS.
+parse_keep_env() {
+  local raw="$1"
+  local name existing found pattern
+  [[ -n "$raw" ]] || { error "--keep-env requires at least one variable name"; return 1; }
+  # read consumes one line only; a newline would silently truncate the list.
+  if [[ "$raw" == *$'\n'* || "$raw" == *$'\r'* ]]; then
+    error "invalid --keep-env list: contains a line break"
+    return 1
+  fi
+  # An empty entry (leading comma, trailing comma, or double comma) is
+  # refused from the raw value: read drops a trailing empty field, so field
+  # splitting alone would accept `NAME,`.
+  case "$raw" in
+    ,*|*,|*,,*)
+      error "invalid --keep-env list: empty entry"
+      return 1
+      ;;
+  esac
+  local -a parts=()
+  local IFS=,
+  # read -ra splits the quoted value with no glob expansion: `AWS_*` stays the
+  # literal string and fails the name check below instead of being replaced by
+  # matching file names from the working directory.
+  read -ra parts <<< "$raw"
+  for name in "${parts[@]}"; do
+    if [[ -z "$name" || ! "$name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      error "invalid --keep-env name: '${name:-}' (a variable name; '=' and whitespace are refused)"
+      return 1
+    fi
+    for pattern in "${KEEP_ENV_REFUSED[@]}"; do
+      # shellcheck disable=SC2053
+      if [[ "$name" == $pattern ]]; then
+        error "--keep-env refuses '${name}': it can inject code into the sandbox"
+        error "refused names and prefixes: $(printf '%s ' "${KEEP_ENV_REFUSED[@]}")"
+        return 1
+      fi
+    done
+    found=0
+    for existing in ${KEEP_ENV_NAMES[@]+"${KEEP_ENV_NAMES[@]}"}; do
+      [[ "$existing" == "$name" ]] && { found=1; break; }
+    done
+    [[ "$found" -eq 1 ]] || KEEP_ENV_NAMES+=("$name")
+  done
+  return 0
+}
+
 # Scrub sensitive env vars
 scrub_env() {
   local scrubbed=()
-  local varname pattern
+  local varname pattern skip keep
   while IFS= read -r varname; do
     [[ -z "$varname" ]] && continue
+    # --keep-env exempts a name from the scrub: an outer launcher (codemux's
+    # provider overrides) may need to deliver exactly one credential through
+    # an otherwise scrubbed environment.
+    skip=0
+    for keep in ${KEEP_ENV_NAMES[@]+"${KEEP_ENV_NAMES[@]}"}; do
+      [[ "$keep" == "$varname" ]] && { skip=1; break; }
+    done
+    [[ "$skip" -eq 1 ]] && continue
     for pattern in "${SCRUB_PATTERNS[@]}"; do
       # shellcheck disable=SC2053
       [[ "$varname" == $pattern ]] || continue
@@ -3961,6 +4062,8 @@ PROJECT_DIR=""
 COMMAND=()
 CLI_BLOCKED=()
 CLI_ALLOWED=()
+# Env var names exempt from --scrub-env via --keep-env (exact names, deduped).
+KEEP_ENV_NAMES=()
 CONFIG_BLOCKED=()
 CONFIG_ALLOWED=()
 # String configs init to "" (unset means "use default"); boolean configs also
@@ -4063,6 +4166,14 @@ while [[ $# -gt 0 ]]; do
       SCRUB_ENV=1
       CLI_SCRUB_ENV=1
       shift
+      ;;
+    --keep-env)
+      if [[ $# -lt 2 ]]; then
+        error "missing argument for $1"
+        exit 1
+      fi
+      parse_keep_env "$2" || exit 1
+      shift 2
       ;;
     -C|--cwd)
       if [[ $# -lt 2 ]]; then
@@ -4765,6 +4876,20 @@ if [[ "$GROK_DEFENSE" -eq 1 && "$DETECTED_HARNESS" == "grok" ]]; then
   STRICT=1
   SCRUB_ENV=1
   info "grok defense: strict mode, environment scrubbing, Git-history and dotenv blocks enabled"
+  # The defense's scrub is not negotiable from the command line: a kept name
+  # would hand Grok the very credentials the mode exists to withhold
+  # (review sc7).
+  if [[ ${KEEP_ENV_NAMES[0]+_} ]]; then
+    error "grok defense refuses --keep-env: the scrub it enables cannot be relaxed for a Grok command"
+    exit 1
+  fi
+fi
+
+# --keep-env only modulates the scrub; with scrubbing off (no flag, config,
+# or defense turned it on) the exemption would silently promise something
+# nothing delivers. Warned here, after every source of SCRUB_ENV has spoken.
+if [[ ${KEEP_ENV_NAMES[0]+_} && "${SCRUB_ENV}" -ne 1 ]]; then
+  warning "--keep-env has no effect without --scrub-env: ${KEEP_ENV_NAMES[*]}"
 fi
 
 # Resolve CLI/config blocked+allowed paths relative to project dir.
@@ -5259,6 +5384,10 @@ print_dry_run_env() {
   fi
   if [[ "${SCRUB_ENV}" -eq 1 ]]; then
     echo "#   --scrub-env active"
+    # Names only — never the values the kept variables carry.
+    if [[ ${KEEP_ENV_NAMES[0]+_} ]]; then
+      echo "#   --keep-env: ${KEEP_ENV_NAMES[*]}"
+    fi
   fi
   if [[ "$GROK_DEFENSE" -eq 1 ]]; then
     echo "#   grok_defense active"

@@ -291,7 +291,7 @@ assert_strict_harness_paths() {
   assert_strict_harness_paths cursor-agent "$HOME/.cursor"
 }
 
-@test "strict+copilot auto-allows config and Linux cache" {
+@test "strict+copilot auto-allows config and the XDG cache on every platform" {
   assert_strict_harness_paths copilot "$HOME/.copilot" "$HOME/.cache/copilot"
 }
 
@@ -321,6 +321,34 @@ assert_strict_harness_paths() {
 
 @test "strict+grok auto-allows the default GROK_HOME" {
   assert_strict_harness_paths grok "$HOME/.grok"
+}
+
+@test "strict+agy auto-allows the Gemini CLI root agy shares" {
+  assert_strict_harness_paths agy "$HOME/.gemini"
+}
+
+@test "strict+agent stays an unknown command in dry and real runs" {
+  # `agent` is not a known harness: the name is too generic (any repository
+  # can ship a script called agent), and the launcher's own name —
+  # cursor-agent, the name codemux launches it under — is the recognized
+  # one. A bare `agent` command warns and gets no ~/.cursor auto-allow,
+  # in a dry run and in a real run alike.
+  local bindir="$TEST_PROJECT/tools"
+  mkdir -p "$bindir"
+  printf '#!/bin/sh\nexit 0\n' > "$bindir/agent"
+  chmod +x "$bindir/agent"
+  PATH="$bindir:$PATH" run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" agent
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not a known harness"* ]]
+  [[ "$output" != *"strict+agent"* ]]
+  [[ "$output" != *"$HOME/.cursor"* ]]
+  [[ "$output" != *"auto-allowing"* ]]
+  require_runtime_sandbox
+  PATH="$bindir:$PATH" run "$SCODE" --strict -C "$TEST_PROJECT" agent
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"not a known harness"* ]]
+  [[ "$output" != *"strict+agent"* ]]
+  [[ "$output" != *"auto-allowing"* ]]
 }
 
 @test "strict+grok does not auto-allow an environment-controlled GROK_HOME" {
@@ -631,3 +659,4 @@ YAML
   [[ "$output" != *"file-write*"*"$HOME/.ssh"* ]]
   [[ "$output" != *"(subpath \"$HOME/.aws\")"* ]]
 }
+

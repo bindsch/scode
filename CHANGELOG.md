@@ -7,6 +7,68 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-10
+
+### Added
+
+- **Known-harness support for Google Antigravity CLI (`agy`).** `agy` shares
+  the Gemini CLI root: the installed binary's own strings (v1.3.1) and the
+  live `~/.gemini` tree put its settings and cache under
+  `~/.gemini/antigravity-cli`, shared config under `~/.gemini/config`, and
+  root-level files (`GEMINI.md`, `AGENTS.md`, `projects.json`) beside them —
+  so strict mode auto-allows `~/.gemini`, and allowing only the two
+  subdirectories would miss the root-level state. Sandboxed `agy` runs no
+  longer warn "not a known harness". The Cursor Agent's alias `agent` is
+  deliberately not recognized: the name is too generic (any repository can
+  ship a script called agent), and the launcher's own name, `cursor-agent`,
+  is. codemux 0.12.0 launches the Cursor Agent as `cursor-agent` — the real
+  launcher name, present in every install beside the `agent` symlink — so
+  those runs keep the auto-allow; a bare `agent` command stays unknown,
+  warns, and gets no `~/.cursor` auto-allow.
+- **`--keep-env NAME[,NAME...]`** exempts exact variable names from
+  `--scrub-env`. An outer launcher that has already authenticated (codemux's
+  provider overrides) needs to deliver one named credential through an
+  otherwise scrubbed environment; the flag is the opt-in for that. A name
+  containing `=` or whitespace is refused, as is an empty list entry
+  (leading, middle, or trailing) and any glob-looking entry (entries are
+  never expanded against the working directory). Startup-injection and
+  loader variables (`LD_*`, `DYLD_*`, `NODE_OPTIONS`, `BASH_ENV`, `ENV`,
+  `ZDOTDIR`, `PYTHONPATH`, `PYTHONHOME`, `RUBYOPT`, `PERL5OPT`, `PERL5LIB`,
+  `PERLLIB`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `GIT_CONFIG_*`,
+  `GIT_ASKPASS`, `SSH_*`) are refused outright — the exemption can only ever
+  name a credential, and the refusal error prints the set. The flag is
+  repeatable and deduplicates; `--dry-run` prints the kept names (never their
+  values); passing it with no source of scrubbing (the flag or a config
+  `scrub_env`) warns that it has no effect; and under Grok defense it is
+  refused outright, since that scrub cannot be relaxed for a Grok command.
+  There was no pass-through mechanism before.
+- **Scrub patterns for the credentials the current routing stack reads:**
+  `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `CODEX_API_KEY`,
+  `ZAI_API_KEY`, `ZHIPU_API_KEY`, `MOONSHOT_API_KEY`, `KIMI_API_KEY`,
+  `KIMI_MODEL_API_KEY`, `DASHSCOPE_API_KEY`, `QWEN_API_KEY`,
+  `COPILOT_GITHUB_TOKEN`, `CURSOR_API_KEY`, `FACTORY_API_KEY`, and
+  `LLM_API_KEY` (the OpenHands and Aider override credential; a launcher
+  that injects it keeps it with `--keep-env LLM_API_KEY`). A scrubbed run
+  previously handed all of these to the child. Provider configuration
+  (base URLs, model names, override-delivery channels such as
+  `OPENAI_API_BASE`, `LLM_BASE_URL`, `GOOSE_PROVIDER`, `KIMI_MODEL_*` other
+  than the key, `PI_CODING_AGENT_DIR`, `OPENCODE_CONFIG`) and the
+  `CODEMUX_*` control variables are deliberately not scrubbed: they route a
+  run, they do not authenticate one — codemux provider-override runs depend
+  on them passing through. One of them is credential-shaped:
+  `CODEMUX_CODEX_PROVIDER_API_KEY` carries the Codex override API key, so a
+  scrubbed run still delivers it; the caller controls that by exporting the
+  override only for the runs that need it.
+
+### Fixed
+
+- The README called the `~/.cache/copilot` harness auto-allow Linux-only
+  while the code applied it on every platform. The code was right: the
+  Copilot CLI's own code consults `~/.cache/copilot` (the XDG fallback) in
+  the same candidate list on every platform, with `~/Library/Caches/copilot`
+  as the macOS primary — which stays blocked with the rest of `~/Library`.
+  The README now matches the code.
+
 ## [0.5.0] - 2026-10-07
 
 ### Changed

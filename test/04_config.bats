@@ -1159,3 +1159,11 @@ YAML
   [ "$status" -ne 0 ]
   [[ "$output" == *"grok_defense conflicts with allowed path"* ]]
 }
+
+@test "config grok_defense refuses --keep-env (review sc7)" {
+  local config_file="$TEST_PROJECT/grok-defense.yaml"
+  printf 'grok_defense: true\n' > "$config_file"
+  run "$SCODE" --dry-run --config "$config_file" --keep-env XAI_API_KEY -C "$TEST_PROJECT" -- grok
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"grok defense refuses --keep-env"* ]]
+}
