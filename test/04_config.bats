@@ -108,8 +108,16 @@ YAML
   for platform in darwin linux; do
     _SCODE_PLATFORM="$platform" run "$SCODE" --dry-run --config "$config_file" -C "$TEST_PROJECT" -- true
     [ "$status" -eq 0 ]
-    # Documents is blocked by default but allowed by config — should not be blocked.
-    [[ "$output" != *"$HOME/Documents"* ]]
+    # Documents is blocked by default but allowed by config: no block rule
+    # may name it. On Linux an explicit allow is bound into the sandbox
+    # (a --bind, which does name the path), so only the tmpfs block is
+    # asserted absent there.
+    if [[ "$platform" == linux ]]; then
+      [[ "$output" != *"--tmpfs $HOME/Documents"* ]]
+      [[ "$output" == *"--bind $HOME/Documents $HOME/Documents"* ]]
+    else
+      [[ "$output" != *"$HOME/Documents"* ]]
+    fi
   done
 }
 

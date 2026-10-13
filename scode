@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.0"
+readonly PROGRAM_VERSION="0.6.1"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -230,12 +230,12 @@ SCRUB_PATTERNS=(
   # credential-shaped — CODEMUX_CODEX_PROVIDER_API_KEY carries the Codex
   # override API key and does pass through --scrub-env; removing the family
   # would cut sandboxed codex off from the override codemux configured (the
-  # trade-off is recorded in docs/align-0.6-report.md section 2, and the
+  # trade-off is recorded in docs/environment.md, and the
   # caller controls it by exporting the override only for runs that need it).
   # Provider configuration such as OPENAI_API_BASE, LLM_BASE_URL, LLM_MODEL,
   # GOOSE_PROVIDER, KIMI_MODEL_* (other than the key), PI_CODING_AGENT_DIR,
   # and OPENCODE_CONFIG is configuration, not a credential, and stays.
-  # LLM_API_KEY is a credential (review sc4): scrubbed like the others; a
+  # LLM_API_KEY is a credential: scrubbed like the others; a
   # launcher that injects it for an override keeps it with --keep-env.
   "ANTHROPIC_AUTH_TOKEN"
   "CLAUDE_CODE_OAUTH_TOKEN"
@@ -585,8 +585,8 @@ Options:
   --ro                Mount project directory read-only
   --rw                Mount project directory read-write (default)
   --block PATH        Block access to a path (directory or file; can be repeated)
-  --allow PATH        Allow access to a path subtree, overriding block rules (can be repeated)
-  --strict            Deny-default sandbox (only allow project dir + system essentials)
+  --allow PATH        Request recursive access (subject to policy precedence; repeatable)
+  --strict            Deny-default; project, system, scratch, and detected harness grants
   --trust LEVEL       Named trust preset: trusted, standard, untrusted (singleton)
   --config FILE       Use FILE as config (default: ~/.config/scode/sandbox.yaml; singleton)
   --scrub-env         Scrub sensitive env vars (API keys, tokens) before exec
@@ -594,16 +594,20 @@ Options:
                       (repeatable; names only, no patterns)
   --no-credential-sync
                       Do not copy Claude Code's Keychain credential to
-                      ~/.claude/.credentials.json (sandboxed claude cannot
-                      then authenticate; macOS only)
-  --log FILE          Log sandbox violations to FILE (creates parent dirs; singleton)
+                      ~/.claude/.credentials.json (macOS only). Existing auth
+                      can work; mirrored refresh tokens can still refuse launch.
+  --log FILE          Replace FILE with stderr capture (creates parent dirs; singleton)
   --dry-run           Print sandbox profile/command without executing
 
 Path Semantics:
   Relative paths for --block/--allow and config blocked/allowed are resolved
   against the project directory (--cwd, or $PWD by default).
-  Allow rules are recursive (firewall-style): allowing /a allows /a/**
-  even if descendants are listed in defaults or --block/config blocked.
+  Allows are recursive. CLI blocks beat config allows; CLI allows can make
+  exceptions. Grok blocks, project read-only, and privilege masks remain final.
+  Relative --config/--log paths use the invoking directory.
+  Options stop at the command. Use separate values, not --option=value or
+  bundled short flags. Repeated --ro/--rw use the last value.
+  Full precedence and platform differences: docs/policy.md.
 
 Known Harnesses (can be used directly without --):
 EOF
@@ -611,10 +615,8 @@ EOF
   harness_list="$(printf '%s, ' "${KNOWN_HARNESSES[@]}")"
   echo "  ${harness_list%, }"
   echo ""
-  echo "  The bare name 'agent' (a Cursor Agent alias) is not recognized:"
-  echo "  the name is too generic, and the launcher's own name is"
-  echo "  cursor-agent — the name codemux launches it under. An 'agent'"
-  echo "  command stays unknown and warns."
+  echo "  A standalone binary named 'agent' is unknown. A symlink that resolves"
+  echo "  to cursor-agent is recognized after executable canonicalization."
   cat <<'EOF'
 
 Default Protections:
@@ -667,25 +669,25 @@ Platform Support:
 Examples:
   scode opencode                     # run opencode in sandbox
   scode claude                       # run claude in sandbox
-  scode codemux -a claude            # run codemux with claude adapter
+  scode codemux tui -a claude        # run codemux with claude adapter
   scode -- npm test                  # run any command in sandbox
-  scode --ro claude                  # read-only sandbox
+  scode --ro claude                  # read-only project
   scode --allow ~/Documents claude   # unblock ~/Documents
   scode -n claude                    # no network access
   scode --strict claude              # deny-default; ~/.claude stays read-write
-  scode --trust untrusted claude     # maximum lockdown; no harness-state auto-allow
+  scode --trust untrusted claude     # restrictive preset; no harness-state auto-allow
   scode --trust trusted claude       # minimal sandbox (rw, net on)
   scode --scrub-env claude           # scrub API keys from env
-  scode --log session.log claude     # log sandbox denials for review
+  scode --log session.log claude     # capture stderr; replaces session.log
   scode audit session.log            # parse denials, suggest --allow flags
 
 Strict Mode Auto-Allow:
   When --strict detects a known harness, it automatically allows read-write access to:
     - The harness config/state paths (e.g. ~/.claude for claude)
   Write access is required: harnesses keep their state there, and most rotate
-  their own credential in place. A sandboxed claude is the exception: it gets
-  an access-token-only copy of the Keychain credential (see the README) and
-  never holds the refresh token.
+  their own credential in place. Successful macOS Claude Keychain synchronization
+  writes an access-token-only copy. File-only macOS logins and Linux are exceptions;
+  see docs/harnesses.md. Detection does not certify authentication compatibility.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
   --trust untrusted disables harness-state auto-allows entirely.
 
@@ -693,8 +695,9 @@ Trust Presets:
   --trust trusted      Minimal sandbox: rw, network on, no strict, no scrub-env.
                        Overrides config-level settings for these four values.
   --trust standard     Default behavior (same as no --trust flag).
-  --trust untrusted    Maximum lockdown: --strict + --no-net + --scrub-env + --ro.
-                       Cannot be weakened by config files.
+  --trust untrusted    --strict + --no-net + --scrub-env + --ro, without automatic
+                       harness grants or Claude copying. Overrides config scalars;
+                       config allows and the project grant still apply.
   Explicit flags (--rw, --strict, etc.) override --trust settings.
 
 Project Config:
@@ -1449,9 +1452,8 @@ run_engine_forwarding() {
   return "${rc}"
 }
 
-# kcov runs only on Linux, so this macOS-only code can never be executed under
-# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
-# it here keeps the percentage honest instead of penalizing unreachable lines.
+# Both platforms run this launcher. It is excluded from kcov because it closes
+# the reporting descriptor and execs; runtime tests exercise it separately.
 # Neither sandbox-exec nor bubblewrap can close inherited descriptors for us
 # (bubblewrap has no such option in any released version). Start the engine
 # through a fixed privileged Bash that closes every inherited descriptor except
@@ -2959,9 +2961,9 @@ audit_watch() {
   done
 }
 
-# kcov runs only on Linux, so this macOS-only code can never be executed under
-# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
-# it here keeps the percentage honest instead of penalising unreachable lines.
+# These profile-emission functions remain excluded from kcov measurement.
+# Both platforms collect coverage; macOS profile and runtime tests exercise
+# this block, but its lines do not contribute to the reported percentage.
 # SCODE_COVERAGE_EXCLUDE_START
 # Seatbelt uses last-match precedence. Reassert custom blocks after broad
 # carve-outs/automatic allows, then restore only authoritative CLI/user child
@@ -3022,9 +3024,9 @@ EOF
 }
 # SCODE_COVERAGE_EXCLUDE_END
 
-# kcov runs only on Linux, so this macOS-only code can never be executed under
-# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
-# it here keeps the percentage honest instead of penalising unreachable lines.
+# These profile-emission functions remain excluded from kcov measurement.
+# Both platforms collect coverage; macOS profile and runtime tests exercise
+# this block, but its lines do not contribute to the reported percentage.
 # SCODE_COVERAGE_EXCLUDE_START
 # Generate macOS sandbox profile (default mode: allow default, deny specific)
 generate_profile() {
@@ -3215,9 +3217,9 @@ EOF
 }
 # SCODE_COVERAGE_EXCLUDE_END
 
-# kcov runs only on Linux, so this macOS-only code can never be executed under
-# coverage. It is exercised by the full bats suite on the macOS CI job; excluding
-# it here keeps the percentage honest instead of penalising unreachable lines.
+# These profile-emission functions remain excluded from kcov measurement.
+# Both platforms collect coverage; macOS profile and runtime tests exercise
+# this block, but its lines do not contribute to the reported percentage.
 # SCODE_COVERAGE_EXCLUDE_START
 # Generate macOS sandbox profile (strict mode: deny default, allow specific)
 generate_strict_profile() {
@@ -3513,7 +3515,7 @@ build_bwrap_args() {
     fi
   fi
 
-  # Home directory (read-write) — mirrors macOS default-allow model
+  # Home directory (read-write); other host subtrees still require mounts.
   BWRAP_ARGS+=(--bind "$HOME" "$HOME")
 
   # Privilege escalation prevention
@@ -3552,6 +3554,12 @@ build_bwrap_args() {
   if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -e "${SCODE_NO_SANDBOX_JS}" ]]; then
     BWRAP_ARGS+=(--ro-bind "$SCODE_NO_SANDBOX_JS" "$SCODE_NO_SANDBOX_JS")
   fi
+
+  # Explicit grants can introduce host paths absent from the initial mounts.
+  # Final policy below reasserts retained custom blocks and project read-only.
+  for dir in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+    append_bwrap_allow "$dir" "$project_dir" "$fs_mode"
+  done
 
   append_bwrap_final_policy "$project_dir" "$fs_mode" 0
 
@@ -4452,10 +4460,9 @@ else
   warning "'${COMMAND[0]}' is not a known harness — sandbox behavior has not been tested for this command"
 fi
 
-# kcov runs only on Linux, so this macOS-only code can never be executed under
-# coverage. The guards that warn are exercised by test/10_credential_sync.bats
-# on the macOS CI job; excluding it here keeps the percentage honest instead of
-# penalizing unreachable lines.
+# Credential handling remains excluded from kcov measurement on both platforms.
+# test/10_credential_sync.bats covers guarded skips; controlled macOS Keychain
+# verification is documented in docs/releases.md.
 # SCODE_COVERAGE_EXCLUDE_START
 # Claude Code keeps its credential in the macOS Keychain, which the sandbox
 # blocks along with the rest of ~/Library, so a sandboxed claude reports
@@ -4467,7 +4474,8 @@ fi
 # it back to the Keychain and deletes the file. So the copy is made here, in the
 # parent process, which is still outside the sandbox and can read the Keychain.
 #
-# Only the ACCESS token is copied; the refresh token never leaves the Keychain.
+# Successful synchronization writes only the access token from the Keychain.
+# File-only macOS logins and Linux are outside this synchronization contract.
 # A sandboxed claude authenticates for the access token's lifetime (hours) and
 # fails with a plain 401 when it expires or is revoked -- it cannot refresh.
 # That restriction is the point: a copy that could refresh would rotate the
@@ -4475,9 +4483,8 @@ fi
 # presenting the superseded refresh token makes the provider revoke the whole
 # grant family, logging the operator out of every Claude session (which is
 # what happened on 2026-10-05 when the copy still carried it). The access
-# token is a bearer credential without rotation, so copies of it are harmless.
-# --no-credential-sync declines the copy; sandboxed claude then cannot
-# authenticate.
+# token remains a bearer credential readable by sandboxed programs.
+# --no-credential-sync declines copying, not existing authentication.
 # Whether the Claude credential file at $1 holds a refresh token (read
 # through any symlink; a non-file or unreadable path counts as "no").
 claude_file_holds_refresh_token() {
@@ -4562,8 +4569,8 @@ sync_claude_credential() {
 
   # Declared separately: within one `local`, $dir is not yet assigned when a
   # later name on the same line expands it, which trips set -u.
-  # --trust untrusted drops the auto-allow, so the sandbox cannot read
-  # ~/.claude -- unless the operator re-opened it with an explicit --allow,
+  # --trust untrusted drops the auto-allow. Explicit grants or project selection
+  # can still expose ~/.claude. This guard checks explicit grants only,
   # in which case nothing is copied but the one rule still applies.
   if [[ "$CLI_TRUST" == "untrusted" ]]; then
     [[ "$_explicitly_allowed" -eq 1 ]] && refuse_claude_refresh_token_if_mirrored "--trust untrusted declines the copy"
@@ -4630,8 +4637,8 @@ sync_claude_credential() {
     fi
   fi
 
-  # A symlinked ~/.claude or credential file is never read through, merged,
-  # or written through: the copy would land wherever the link points, and a
+  # Synchronization never writes through a symlinked ~/.claude or credential
+  # file. Refusal checks can read through it. A
   # rewrite would turn whatever file the link reaches into one the sandbox
   # can read. Nothing is synced then; a refresh token behind the link is the
   # usual refusal when a Keychain item exists.
@@ -4999,9 +5006,9 @@ if [[ "${STRICT}" -eq 1 && ${ALL_ALLOWED[0]+_} ]]; then
 fi
 
 # Harness-aware strict profiles: auto-detect the harness and expose its default
-# config/state paths read-only so --strict remains usable without letting a
-# compromised tool alter credentials. The untrusted preset disables even these
-# convenience openings; callers must opt in path by path.
+# config/state paths read-write so rotating credentials can be persisted.
+# HARNESS_STRICT_RO is a legacy name; both builders grant read-write access.
+# The untrusted preset disables these automatic grants.
 HARNESS_STRICT_RO=()
 if [[ "${STRICT}" -eq 1 && "$CLI_TRUST" != "untrusted" ]]; then
   _detected_harness="${DETECTED_HARNESS:-}"
@@ -5460,6 +5467,12 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     fi
   fi
 
+  # Reassert after explicit grants and the exact command auto-allow.
+  PROFILE="${PROFILE}
+
+; Privilege command restriction (final)
+(deny process-exec (regex #\"(/|^)(sudo|su|login|doas|pkexec)$\"))"
+
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "${PROFILE}"
     echo ""
@@ -5516,9 +5529,8 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     build_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"}
   fi
 
-  # Linux parity with macOS: if the command binary itself is under a blocked
-  # parent (defaults/config/project), re-bind that file so execution works.
-  # Explicit CLI --block still wins and suppresses this auto-allow.
+  # Re-bind the exact command under a default/platform block only.
+  # Every retained custom-policy source suppresses this exception.
   if [[ -n "${COMMAND_BINARY_PATH}" && "$_command_has_custom_block" -eq 0 ]]; then
     if [[ "$STRICT" -eq 1 ]]; then
       BWRAP_ARGS+=(--ro-bind "${COMMAND_BINARY_PATH}" "${COMMAND_BINARY_PATH}")
@@ -5533,6 +5545,11 @@ elif [[ "$PLATFORM" == "linux" ]]; then
     done
     fi
   fi
+
+  # Later binds must not reopen the privilege-command masks.
+  for priv in /usr/bin/sudo /usr/bin/su /usr/bin/login /usr/bin/doas /usr/bin/pkexec; do
+    [[ -f "$priv" ]] && BWRAP_ARGS+=(--ro-bind /dev/null "$priv")
+  done
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf 'bwrap'

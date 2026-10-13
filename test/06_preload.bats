@@ -114,6 +114,7 @@ done
 exec "$@"
 EOF
   chmod +x "$tool_dir/sudo"
+  require_fixture_exec "$tool_dir/sudo"
 
   val=$(PATH="$tool_dir:$PATH" SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
@@ -158,6 +159,7 @@ done
 exec "$@"
 EOF
   chmod +x "$tool_dir/sudo"
+  require_fixture_exec "$tool_dir/sudo"
 
   val=$(PATH="$tool_dir:$PATH" SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
@@ -205,6 +207,7 @@ done
 exec "$@"
 EOF
   chmod +x "$tool_dir/sudo"
+  require_fixture_exec "$tool_dir/sudo"
 
   val=$(PATH="$tool_dir:$PATH" SCODE_SANDBOXED=1 NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');
@@ -404,6 +407,7 @@ EOF
 
 @test "preload does not patch when SCODE_SANDBOXED is not set" {
   require_node
+  unset SCODE_SANDBOXED
   local val
   val=$(NODE_OPTIONS="--require $NO_SANDBOX_JS" node -e "
     const cp = require('child_process');

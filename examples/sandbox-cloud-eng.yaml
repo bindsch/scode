@@ -2,9 +2,9 @@
 # Copy to ~/.config/scode/sandbox.yaml
 #
 # For infrastructure/cloud engineers. Reopens only Kubernetes, Docker, and
-# Helm state that the built-in policy blocks. This is still allow-default mode;
-# add `strict: true` if those paths and the project should be the only writable
-# user data.
+# Helm state that the built-in policy blocks. This uses default mode.
+# Adding `strict: true` also leaves the project, detected harness state,
+# private scratch, and these explicit grants writable.
 
 scrub_env: true
 # Ambient cloud/API tokens are removed. Prefer a narrowly scoped credential

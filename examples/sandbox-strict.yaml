@@ -2,7 +2,8 @@
 # Copy to ~/.config/scode/sandbox.yaml
 #
 # Enables strict mode by default. No need to pass --strict on the command line.
-# Note: strict mode already denies everything except project/system/explicit allows.
+# Strict grants project, system essentials, private scratch, explicit paths,
+# and detected harness state (read-write).
 # "blocked" entries here mainly matter when you also allow a parent path.
 
 strict: true
@@ -12,7 +13,7 @@ blocked:
   - ~/Dropbox
   - ~/OneDrive
 
-# In strict mode, only the project dir and system paths are allowed.
+# Automatic harness grants remain; --trust untrusted disables them.
 # Use "allowed" to grant read-write access to specific extra directories.
 allowed:
   # - ~/shared-libs

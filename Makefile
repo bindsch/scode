@@ -25,7 +25,7 @@ SHELL_COVERAGE_MIN ?= 80
 # the default 0 only reports the number.
 COVERAGE_SINGLE_MIN ?= 0
 
-.PHONY: install uninstall check-prefix test test-js lint coverage coverage-gate release-pins check-pins
+.PHONY: install uninstall check-prefix check-node test test-js lint coverage coverage-gate release-pins check-pins
 
 check-prefix:
 	@case '$(PREFIX)' in \
@@ -55,10 +55,11 @@ uninstall: check-prefix
 lint:
 	shellcheck scode
 
-test-js:
-	@command -v node >/dev/null 2>&1 || { echo "node >= 22 is required" >&2; exit 1; }
-	@node -e 'if (Number(process.versions.node.split(".")[0]) < 22) process.exit(1)' \
-		|| { echo "node >= 22 is required" >&2; exit 1; }
+check-node:
+	@command -v node >/dev/null 2>&1 || { echo "Node 22, 24, or 26 is required" >&2; exit 1; }
+	node scripts/check-node.js
+
+test-js: check-node
 	@test -d node_modules || { echo "node_modules missing (run npm ci)" >&2; exit 1; }
 	SCODE_TEST=1 node --test test/no-sandbox.test.js
 
@@ -72,9 +73,8 @@ test: lint test-js
 # runtime-sandbox tests, so one platform's report understates what the suite
 # exercises. `coverage-gate` enforces it over the merged reports (CI collects
 # on both and gates once); COVERAGE_SINGLE_MIN=80 gates this report alone.
-coverage: lint
+coverage: lint check-node
 	@command -v kcov >/dev/null 2>&1 || { echo "kcov is required for shell coverage" >&2; exit 1; }
-	@command -v node >/dev/null 2>&1 || { echo "node >= 22 is required" >&2; exit 1; }
 	@test -x node_modules/.bin/c8 || { echo "node_modules missing (run npm ci)" >&2; exit 1; }
 	@set -eu; \
 		platform="$$(uname -s | tr '[:upper:]' '[:lower:]')"; \
@@ -107,11 +107,10 @@ coverage-gate:
 	@[ -n "$(COVERAGE_REPORTS)" ] || { echo "no coverage/shell-*.cobertura.xml to gate (run make coverage first)" >&2; exit 1; }
 	@node scripts/coverage-gate.js "$(SHELL_COVERAGE_MIN)" $(COVERAGE_REPORTS)
 
-# Rewrite the README install pins (commit + artifact checksums) from the
-# release tag. Run after tagging; see docs/RELEASE-GATE.md.
+# Update the installation tag before tagging; see docs/releases.md.
 release-pins:
 	./scripts/release-pins.sh update
 
-# Verify the README pins match the release tag without modifying anything.
+# Verify installation documentation against PROGRAM_VERSION before tagging.
 check-pins:
 	./scripts/release-pins.sh check

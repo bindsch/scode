@@ -3,11 +3,10 @@
 #
 # Entries here are merged with built-in defaults:
 #   - "blocked" adds to the default blocked list
-#   - "allowed" overrides blocks recursively (path + descendants),
-#     including defaults and your additions
+#   - "allowed" requests recursive access, subject to policy precedence
 #   - scalar options (net, fs_mode, strict, scrub_env, grok_defense) set defaults
 #
-# Priority: CLI flags > user config > project config > environment variables > built-in defaults
+# See docs/configuration.md and docs/policy.md for scalar and path precedence.
 #
 # Built-in defaults already block:
 #   personal documents/media and shell/database histories
@@ -18,13 +17,13 @@
 #
 # See also:
 #   sandbox-strict.yaml - for use with --strict flag
-#   sandbox-paranoid.yaml - maximum lockdown for untrusted code
+#   sandbox-paranoid.yaml - restrictive scalars; add --trust untrusted for review
 #   sandbox-permissive.yaml - opens up dirs for trusted projects
 #   sandbox-cloud-eng.yaml - for cloud/infra engineers
 #   sandbox-grok.yaml - Grok collection and Git-history defense
 
 # Sandbox flags (uncomment to enable)
-# These act as defaults; CLI flags always win.
+# These set scalar defaults; detected Grok defense still forces strict/scrub.
 # net: off             # disable network (same as --no-net)
 # fs_mode: ro          # read-only project dir (same as --ro)
 # strict: true         # deny-default sandbox (same as --strict)
@@ -32,8 +31,8 @@
 # grok_defense: true   # harden Grok collection and project-secret access
 
 # Block additional directories beyond defaults
-# Note: inline comments (space + #) are stripped from unquoted values.
-# Paths containing literal " #" should be quoted: - "~/path with # in name"
+# Unquoted scalars allow inline comments. Unquoted list paths containing " #"
+# are rejected; quote paths and put any comment after the closing quote.
 blocked:
   # - ~/Dropbox
   # - ~/OneDrive

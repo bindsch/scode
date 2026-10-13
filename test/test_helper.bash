@@ -55,6 +55,19 @@ require_node() {
   command -v node >/dev/null 2>&1 || skip "node not installed"
 }
 
+# Some outer sandboxes deny even a harmless test fixture named sudo.
+# Probe only our fixture. Unexpected fixture failures remain test failures.
+require_fixture_exec() {
+  local fixture="$1"
+  run env -u NODE_OPTIONS node -e '
+    const result = require("child_process").spawnSync(process.argv[1], ["/usr/bin/true"]);
+    if (result.error && ["EPERM", "EACCES"].includes(result.error.code)) process.exit(77);
+    if (result.error || result.status !== 0) process.exit(1);
+  ' "$fixture"
+  [ "$status" -eq 77 ] && skip "outer sandbox denies execution of sudo fixture"
+  [ "$status" -eq 0 ]
+}
+
 # Some preload tests exercise rewriting through a wrapper binary such as
 # `timeout` or `stdbuf`. These ship with GNU coreutils and are absent on stock
 # macOS, so the behavior can only be asserted where the wrapper actually exists.

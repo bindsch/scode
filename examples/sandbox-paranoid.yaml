@@ -1,7 +1,8 @@
 # scode paranoid sandbox configuration
 # Copy to ~/.config/scode/sandbox.yaml
 #
-# Maximum lockdown for reviewing untrusted code or running untrusted tools.
+# Restrictive scalars; detected harness state and credential copying remain.
+# For untrusted review: scode --trust untrusted --config this-file.yaml command
 # Built-in rules already block SSH keys, GitHub CLI tokens, and personal data.
 # This profile adds cloud-sync directories.
 # Network disabled, env scrubbed, strict mode, read-only project.
@@ -19,4 +20,4 @@ blocked:
   - ~/iCloud Drive
 
 allowed:
-  # Nothing extra — this is paranoid mode
+  # No explicit grants. Automatic harness grants still apply without the preset.

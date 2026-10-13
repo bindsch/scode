@@ -6,6 +6,7 @@
 .vscode/
 node_modules/
 coverage/
+/scratch/
 .claude/settings.local.json
 /.hookrun/
 /.hookrun-install.lock
