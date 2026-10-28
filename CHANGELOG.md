@@ -7,6 +7,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Recognize resolved Copilot, pi, Claude Code, and Codex package entry scripts
+  by their `node_modules` directories so strict mode applies their state grants.
+  Keep basename detection and `.exe` launcher support.
+  Entry scripts are detected for their state directories, but credential sync
+  requires the harness launcher binary because a script's interpreter comes
+  from the caller's PATH.
+
 ## [0.6.1] - 2026-10-13
 
 ### Fixed

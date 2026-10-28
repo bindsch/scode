@@ -71,6 +71,19 @@ readonly KNOWN_HARNESSES=(
   openhands cline kiro-cli auggie grok
 )
 
+# Package directories identify resolved entry scripts with generic basenames.
+# Each entry is package:harness and matches a complete node_modules directory.
+readonly HARNESS_PACKAGES=(
+  # Copilot 1.0.85: /opt/homebrew/lib/node_modules/@github/copilot/package.json.
+  '@github/copilot:copilot'
+  # pi 0.85.1: /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/package.json.
+  '@earendil-works/pi-coding-agent:pi'
+  # Claude Code 2.1.300: /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/package.json.
+  '@anthropic-ai/claude-code:claude'
+  # Codex 0.164.0: Homebrew's codex-package.json (native installation).
+  '@openai/codex:codex'
+)
+
 # Default blocked directories — personal files and credentials
 DEFAULT_BLOCKED=(
   # Personal files
@@ -1701,9 +1714,10 @@ exec { \$ARGV[0] } @ARGV or die \"scode: engine exec failed: \$!\\n\";
 }
 # SCODE_COVERAGE_EXCLUDE_END
 
-# Check if arg is a known harness
+# Print the canonical harness name, or return failure for an unknown command.
 is_known_harness() {
   local cmd="${1##*/}"
+  local h package package_path
   # npm-installed harnesses can ship a .exe launcher even on POSIX: Claude Code
   # resolves through /opt/homebrew/bin/claude to .../bin/claude.exe. Callers
   # that resolve symlinks therefore hand us a name no entry matches, and the
@@ -1711,7 +1725,19 @@ is_known_harness() {
   # that it is not logged in.
   cmd="${cmd%.exe}"
   for h in "${KNOWN_HARNESSES[@]}"; do
-    [[ "$cmd" == "$h" ]] && return 0
+    if [[ "$cmd" == "$h" ]]; then
+      printf '%s\n' "$h"
+      return 0
+    fi
+  done
+  # Only the final node_modules package can identify the harness.
+  package_path="/$1"
+  package_path="${package_path##*/node_modules/}"
+  for package in "${HARNESS_PACKAGES[@]}"; do
+    if [[ "$package_path" == "${package%:*}/"* ]]; then
+      printf '%s\n' "${package##*:}"
+      return 0
+    fi
   done
   return 1
 }
@@ -1879,11 +1905,11 @@ _detect_harness_from_args() {
     argv=("${argv[@]:$start}")
   fi
 
-  local base
-  base="$(_strip_outer_quotes "${argv[0]}")"
-  base="${base##*/}"
-  if is_known_harness "$base"; then
-    echo "$base"
+  local executable base harness
+  executable="$(_strip_outer_quotes "${argv[0]}")"
+  base="${executable##*/}"
+  if harness="$(is_known_harness "$executable")"; then
+    echo "$harness"
     return 0
   fi
 
@@ -4527,9 +4553,7 @@ refuse_claude_refresh_token() {
 
 sync_claude_credential() {
   [[ "$PLATFORM" == "darwin" ]] || return 0
-  # Homebrew's claude resolves through a symlink to claude.exe, so the detected
-  # name carries the suffix that is_known_harness already strips.
-  [[ "${DETECTED_HARNESS%.exe}" == "claude" ]] || return 0
+  [[ "$DETECTED_HARNESS" == "claude" ]] || return 0
   command -v security >/dev/null 2>&1 || return 0
 
   # Only write the credential where a sandboxed process could actually use it.
@@ -4576,14 +4600,16 @@ sync_claude_credential() {
     [[ "$_explicitly_allowed" -eq 1 ]] && refuse_claude_refresh_token_if_mirrored "--trust untrusted declines the copy"
     return 0
   fi
-  # Only a direct invocation is inspectable. Behind a wrapper -- env, nice,
-  # timeout -- the binary scode resolved is the wrapper, and the harness it
-  # finally executes is chosen by a PATH the wrapper sets, which is how
-  # `env PATH=$PWD:$PATH claude` passed the check below as /usr/bin/env and
-  # then ran a repository-controlled claude with the token in reach.
-  if [[ "$(basename "${COMMAND_BINARY_PATH:-}")" != "${DETECTED_HARNESS}" ]]; then
-    refuse_claude_refresh_token_if_mirrored "'${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
-    warning "not syncing the Claude credential: '${COMMAND[0]}' is a wrapper, so the harness it runs cannot be checked"
+  # Entry scripts are detected for their state directories, but credential
+  # sync requires the harness launcher binary because a script's interpreter
+  # comes from the caller's PATH. Wrappers can also change PATH before
+  # choosing the harness binary:
+  # `env PATH=$PWD:$PATH claude` resolves to /usr/bin/env but can run a
+  # repository-controlled claude with the token in reach.
+  if [[ "${COMMAND_BINARY_PATH##*/}" != "$DETECTED_HARNESS" &&
+        "${COMMAND_BINARY_PATH##*/}" != "$DETECTED_HARNESS.exe" ]]; then
+    refuse_claude_refresh_token_if_mirrored "'${COMMAND[0]}' does not resolve directly to the harness launcher binary; entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH"
+    warning "not syncing the Claude credential: '${COMMAND[0]}' does not resolve directly to the harness launcher binary; entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH"
     return 0
   fi
 

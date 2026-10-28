@@ -11,6 +11,13 @@ wrappers include `env`, `nice`, `timeout`, `command`, `stdbuf`, `ionice`,
 `taskset`, and shell `-c` forms. Parsing is conservative, not full shell
 evaluation. An argument such as `echo claude` does not select Claude state.
 
+If the basename is unknown, detection checks the full path for a supported
+`node_modules` package directory: `@github/copilot`,
+`@earendil-works/pi-coding-agent`, `@anthropic-ai/claude-code`, or
+`@openai/codex`. Resolved entry scripts such as Copilot's `npm-loader.js`
+and pi's `dist/bundle/cli.js` select the mapped harness name and state grants.
+An unrelated `cli.js` remains unknown.
+
 A standalone executable named `agent` is unknown. An executable symlink named
 `agent` resolving to `cursor-agent` is recognized by its canonical name.
 Detection of names inside wrapper text does not establish binary identity.
@@ -87,7 +94,7 @@ Independent environment or application authentication can also remain available.
 | Keychain locked/denied, file has mirrored refresh token | Refuse launch |
 | Rewrite or required backup fails with mirrored refresh token present | Refuse launch |
 | `--no-credential-sync` | Skip copying; refuse an accessible mirrored refresh token when detected |
-| Wrapper, in-project Claude binary, in-project state directory, or symlinked credential path | Skip copying, warn; refuse if the mirrored-refresh-token check finds one |
+| Resolved executable other than `claude` or `claude.exe` (including entry scripts and wrappers), in-project Claude binary, in-project state directory, or symlinked credential path | Skip copying, warn; refuse if the mirrored-refresh-token check finds one. Entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH. |
 | Dry-run, blocked credential, or untrusted preset without an explicit state grant | Skip copying |
 | Untrusted preset with explicit state grant | Skip copying; check mirrored-refresh-token refusal |
 

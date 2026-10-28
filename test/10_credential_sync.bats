@@ -7,9 +7,9 @@
 # anything, so `security` cannot be shadowed by a test double: the copy itself
 # needs a real Keychain item and is verified by hand, as do the refusals
 # (a refresh token in the file while a Keychain item exists is never launched
-# through). What can be checked without one is the three guards that decline
-# the copy and say so on stderr (a wrapper, a harness inside the project, a
-# ~/.claude inside the project), the opt-out flag, and the file-only-login
+# through). What can be checked without one is the four guards that decline
+# the copy and say so on stderr (an entry script, a wrapper, a harness inside
+# the project, a ~/.claude inside the project), the opt-out flag, and the file-only-login
 # exception: with no Keychain item (a fake HOME has none) a refresh token in
 # the file is Claude Code's own and the launch proceeds with it untouched. The guards that return silently (--dry-run, --trust
 # untrusted, a --block over ~/.claude, no ~/.claude at all) leave nothing to
@@ -53,13 +53,30 @@ run_scode() {
   [[ "$output" == *"--no-credential-sync"* ]]
 }
 
+@test "credential sync: refused for a Claude package entry script whose interpreter comes from PATH" {
+  require_runtime_sandbox
+  local entry_script="$TOOLS/x/node_modules/@anthropic-ai/claude-code/cli.js"
+  mkdir -p "$(dirname "$entry_script")"
+  printf '#!/usr/bin/env node\n' > "$entry_script"
+  chmod +x "$entry_script"
+  mkdir -p "$PROJECT/bin"
+  cp "$TOOLS/bin/claude" "$PROJECT/bin/node"
+  PATH="$PROJECT/bin:$PATH" run_scode --strict -C "$PROJECT" -- "$entry_script"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"strict+claude:"* ]]
+  [[ "$output" == *"CLAUDE_OK"* ]]
+  [[ "$output" == *"not syncing the Claude credential"* ]]
+  [[ "$output" == *"entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH"* ]]
+  [ ! -e "$FAKE_HOME/.claude/.credentials.json" ]
+}
+
 @test "credential sync: refused behind a wrapper whose final binary cannot be checked" {
   require_runtime_sandbox
   run_scode -C "$PROJECT" -- env claude
   [ "$status" -eq 0 ]
   [[ "$output" == *"CLAUDE_OK"* ]]
   [[ "$output" == *"not syncing the Claude credential"* ]]
-  [[ "$output" == *"is a wrapper"* ]]
+  [[ "$output" == *"does not resolve directly to the harness launcher binary"* ]]
   [ ! -e "$FAKE_HOME/.claude/.credentials.json" ]
 }
 
