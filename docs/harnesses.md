@@ -120,6 +120,40 @@ revoked or rotated credential. If an operator must restore the file, do so
 outside the sandbox after checking which store is authoritative; the next sync
 can strip it again. Do not print tokens into logs or commit backups.
 
+## Cursor Agent on macOS
+
+Cursor Agent 2026.10.22 uses Keychain services `cursor-access-token`,
+`cursor-refresh-token`, and `cursor-api-key`, with account `cursor-user`.
+Its `~/.cursor/agent-cli-state.json` and `~/.cursor/cli-config.json` files
+hold state and configuration, not the login tokens.
+
+The macOS `~/Library` block hides Keychain storage under both `standard`
+and `trusted`. The existing `cursor-agent` state grant for `~/.cursor`
+does not restore a Keychain login. Scode has no per-service Keychain grant;
+a filesystem allowance for the login Keychain would expose unrelated items.
+No additional Keychain allowance is provided for Cursor.
+
+This Cursor version supports a file credential store. The operator can
+select it when logging in outside scode:
+
+```sh
+AGENT_CLI_CREDENTIAL_STORE=file cursor-agent login
+```
+
+Use the same selection when launching under the standard sandbox:
+
+```sh
+AGENT_CLI_CREDENTIAL_STORE=file scode --trust standard --ro cursor-agent
+```
+
+On macOS this selects `~/.cursor/auth.json`, which Cursor writes with mode
+0600. A Keychain login does not populate that file automatically. The existing
+harness state grant permits access, including token updates. Programs inside
+the sandbox can read the file's credentials. No reinstall is needed for this
+alternative. Codemux automatically selects this store for sandboxed headless
+runs on macOS when the file exists. An explicit store override is a codemux
+option (`codemux run --pass-env AGENT_CLI_CREDENTIAL_STORE`), not an scode flag.
+
 ## Antigravity
 
 The 2026-10-12 integration observation recorded macOS Antigravity using a
