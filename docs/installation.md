@@ -42,7 +42,7 @@ The commands run in a fail-fast subshell.
 ```sh
 (
   set -eu
-  RELEASE_TAG="v0.6.1"
+  RELEASE_TAG="v0.6.2"
   git clone --filter=blob:none --branch "$RELEASE_TAG" https://github.com/bindsch/scode.git
   cd scode
   release_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
