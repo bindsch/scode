@@ -18,6 +18,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   requires the harness launcher binary because a script's interpreter comes
   from the caller's PATH.
 
+### Documentation
+
+- Describe Cursor Agent's macOS Keychain login (`cursor-access-token`, `cursor-refresh-token`, `cursor-api-key`), why the `~/Library` block hides it, and the supported `AGENT_CLI_CREDENTIAL_STORE=file` login that writes `~/.cursor/auth.json` ([harnesses](docs/harnesses.md)).
+
 ## [0.6.1] - 2026-10-13
 
 ### Fixed
