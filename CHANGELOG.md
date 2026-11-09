@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-09
+
 ### Fixed
 
 - macOS strict profiles now permit metadata-only reads of the home and of
