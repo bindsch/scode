@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS strict profiles now permit metadata-only reads of the home and of
+  every ancestor directory of a granted path. A real Codex session previously
+  failed at startup to initialize its sqlite state runtime under `~/.codex`
+  even though that directory was granted read-write: canonicalizing the path
+  stats each ancestor, and those stats were denied.
+
 ## [0.6.2] - 2026-10-28
 
 ### Fixed

@@ -388,6 +388,106 @@ wait_for_file() {
   [[ "$output" == *"LOCAL_BINARY_OK"* ]]
 }
 
+# ---------- Strict mode: ancestor metadata of granted paths ----------
+#
+# Strict grants the paths themselves but no metadata on their ancestors, so
+# canonicalize/stat of every prefix (/, /Users, the home) failed and harnesses
+# like Codex aborted at startup before touching a granted file.
+
+@test "dry-run: --strict grants metadata on every ancestor of every granted path" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  local empty_config="$TEST_PROJECT/x1-empty-config.yaml"
+  : > "$empty_config"
+  # Consumer shape: codex auto-allow under the real home, workspace elsewhere.
+  SCODE_CONFIG="$empty_config" run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- codex
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(allow file-read-metadata (literal \"/\"))"* ]]
+  case "$HOME" in
+    /Users/*)
+      [[ "$output" == *"(allow file-read-metadata (literal \"/Users\"))"* ]]
+      ;;
+  esac
+  [[ "$output" == *"(allow file-read-metadata (literal \"$HOME\"))"* ]]
+  # Every ancestor of the workspace (project root) up to /.
+  local real_project dir
+  real_project="$(realpath "$TEST_PROJECT")"
+  dir="$(dirname "$real_project")"
+  while [[ "$dir" != "/" ]]; do
+    [[ "$output" == *"(allow file-read-metadata (literal \"$dir\"))"* ]]
+    dir="$(dirname "$dir")"
+  done
+  # Metadata only, never contents: literal directory nodes, no subpath form.
+  [[ "$output" != *"(allow file-read-metadata (subpath"* ]]
+  [[ "$output" != *"(allow file-read* (literal \"$HOME\"))"* ]]
+  # Nothing that is not an ancestor of a grant: a child of home is not one.
+  [[ "$output" != *"(allow file-read-metadata (literal \"$HOME/Library\"))"* ]]
+}
+
+@test "dry-run: --strict ancestor metadata follows a granted home outside HOME" {
+  [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
+  # A private harness home under its own root (the codemux --harness-home
+  # shape): the walk must derive from the granted path, not from $HOME.
+  local fake_home
+  local granted_root
+  local granted_home
+  mkdir -p "$TEST_PROJECT/x1-fake-home"
+  fake_home="$(realpath "$TEST_PROJECT/x1-fake-home")"
+  granted_root="$(realpath "$(mktemp -d)")"
+  track_cleanup "$granted_root"
+  granted_home="$granted_root/outer/inner/harness-home"
+  mkdir -p "$granted_home" "$granted_root/outer/other"
+  local empty_config="$TEST_PROJECT/x1-empty-config2.yaml"
+  : > "$empty_config"
+  HOME="$fake_home" SCODE_CONFIG="$empty_config" run "$SCODE" --dry-run --strict \
+    --allow "$granted_home" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local dir="$granted_home"
+  while [[ "$dir" != "/" ]]; do
+    dir="$(dirname "$dir")"
+    [[ "$output" == *"(allow file-read-metadata (literal \"$dir\"))"* ]]
+  done
+  # HOME is granted metadata on its own even though nothing lies under it.
+  [[ "$output" == *"(allow file-read-metadata (literal \"$fake_home\"))"* ]]
+  # A sibling of the granted chain is not an ancestor of any grant.
+  [[ "$output" != *"(allow file-read-metadata (literal \"$granted_root/outer/other\"))"* ]]
+}
+
+@test "macOS runtime: strict profile stats ancestors and runs sqlite in a granted harness home" {
+  require_runtime_sandbox
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not installed"
+  local fake_home
+  local project
+  local sibling
+  mkdir -p "$TEST_PROJECT/x1-runtime-home/.codex" \
+    "$TEST_PROJECT/x1-runtime-workspace" "$TEST_PROJECT/x1-runtime-sibling"
+  # Realpath every fixture: the profile emits resolved paths (/private/...),
+  # so the sandboxed commands must name the same spellings.
+  fake_home="$(realpath "$TEST_PROJECT/x1-runtime-home")"
+  project="$(realpath "$TEST_PROJECT/x1-runtime-workspace")"
+  sibling="$(realpath "$TEST_PROJECT/x1-runtime-sibling")"
+  local empty_config="$TEST_PROJECT/x1-runtime-config.yaml"
+  local raw_profile="$TEST_PROJECT/x1-profile-raw.txt"
+  local profile="$TEST_PROJECT/x1-profile.sb"
+  : > "$empty_config"
+  echo "scode-x1-secret" > "$sibling/secret.txt"
+  HOME="$fake_home" SCODE_CONFIG="$empty_config" "$SCODE" --dry-run --strict \
+    -C "$project" -- codex > "$raw_profile" 2>/dev/null
+  sed '/^# Command:/,$d' "$raw_profile" > "$profile"
+  # The reported defect: stat of the home prefix is what Codex startup did.
+  run /usr/bin/sandbox-exec -f "$profile" -- /usr/bin/stat "$fake_home"
+  [ "$status" -eq 0 ]
+  run /usr/bin/sandbox-exec -f "$profile" -- /usr/bin/sqlite3 "$fake_home/.codex/x1.sqlite" 'create table t(a);'
+  [ "$status" -eq 0 ]
+  [[ -f "$fake_home/.codex/x1.sqlite" ]]
+  # Metadata on the home does not widen to its contents.
+  run /usr/bin/sandbox-exec -f "$profile" -- /bin/ls "$fake_home"
+  [ "$status" -ne 0 ]
+  # An ungranted sibling directory stays unreadable.
+  run /usr/bin/sandbox-exec -f "$profile" -- /bin/cat "$sibling/secret.txt"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"scode-x1-secret"* ]]
+}
+
 # ---------- Path sanitization ----------
 
 @test "rejects --block path with newline" {

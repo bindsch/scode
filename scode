@@ -3247,6 +3247,57 @@ EOF
 # Both platforms collect coverage; macOS profile and runtime tests exercise
 # this block, but its lines do not contribute to the reported percentage.
 # SCODE_COVERAGE_EXCLUDE_START
+# Emit allow rules for metadata-only reads of every ancestor directory of a
+# granted path. Strict mode grants the paths themselves but nothing on the
+# way to them: a harness that canonicalizes its state directory (Rust's
+# canonicalize and sqlite's open stat every prefix -- /, /Users, the home)
+# fails before it ever opens a granted file. Every rule is a literal
+# directory node: metadata only, never contents, and only ancestors of a
+# grant plus the home directory itself. Emitted last so reasserted custom
+# blocks cannot re-break resolution of a child grant that reopens one.
+emit_strict_ancestor_metadata() {
+  local project_dir="$1"
+  local path dir prior dup
+  local -a seeds=() ancestors=("/")
+
+  # The home itself carries no grant of its own, but harnesses canonicalize
+  # it on startup (it is an ancestor of their state paths), so stat must
+  # reach it even when nothing is granted under it this run.
+  if [[ -n "${HOME:-}" && "$HOME" == /* ]]; then
+    ancestors+=("$(normalize_match_path "$HOME")")
+  fi
+
+  seeds=("$project_dir")
+  [[ -n "${SAFE_DARWIN_TMPDIR:-}" ]] && seeds+=("${SAFE_DARWIN_TMPDIR}")
+  seeds+=(${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"})
+  seeds+=(${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"})
+  [[ -n "${HOME:-}" ]] && seeds+=("${HOME}")
+
+  for path in "${seeds[@]}"; do
+    path="$(normalize_match_path "$path")"
+    [[ "$path" == /* ]] || continue
+    dir="$(dirname "$path")"
+    while [[ "$dir" != "/" ]]; do
+      dup=0
+      for prior in "${ancestors[@]}"; do
+        [[ "$prior" == "$dir" ]] && { dup=1; break; }
+      done
+      [[ "$dup" -eq 0 ]] && ancestors+=("$dir")
+      dir="$(dirname "$dir")"
+    done
+  done
+
+  echo ""
+  echo "; Ancestor directories of granted paths (metadata only, never contents)"
+  for dir in "${ancestors[@]}"; do
+    printf '(allow file-read-metadata (literal "%s"))\n' "$(sbpl_escape "$dir")"
+  done
+}
+# SCODE_COVERAGE_EXCLUDE_END
+# These profile-emission functions remain excluded from kcov measurement.
+# Both platforms collect coverage; macOS profile and runtime tests exercise
+# this block, but its lines do not contribute to the reported percentage.
+# SCODE_COVERAGE_EXCLUDE_START
 # Generate macOS sandbox profile (strict mode: deny default, allow specific)
 generate_strict_profile() {
   local project_dir="$1"
@@ -3424,6 +3475,11 @@ EOF
   fi
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
+
+  # Ancestor metadata comes after the final guards: a blocked ancestor of a
+  # reopened child grant must stay stat-reachable, or canonicalizing the
+  # child fails exactly the way the grant alone used to.
+  emit_strict_ancestor_metadata "$project_dir"
 }
 # SCODE_COVERAGE_EXCLUDE_END
 

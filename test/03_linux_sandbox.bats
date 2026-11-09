@@ -215,6 +215,25 @@ wait_for_file() {
   [ "$status" -eq 0 ]
 }
 
+# bwrap constructs the mount tree with the parents of every bind destination,
+# so metadata on ancestors of granted paths is already implied: stat of the
+# home and of any ancestor of the project succeeds without an explicit rule.
+# macOS strict mode needs the file-read-metadata ancestor rules instead; see
+# test/02_macos_sandbox.bats.
+@test "linux runtime: --strict leaves ancestors of granted paths stat-reachable" {
+  require_linux_bwrap
+  local granted_home="$TEST_PROJECT/x1-granted-home"
+  mkdir -p "$granted_home/.codex"
+  run "$SCODE" --strict --allow "$granted_home" -C "$TEST_PROJECT" -- true
+  [ "$status" -eq 0 ]
+  local dir="$granted_home"
+  while [[ "$dir" != "/" ]]; do
+    run "$SCODE" --strict --allow "$granted_home" -C "$TEST_PROJECT" -- stat "$dir"
+    [ "$status" -eq 0 ]
+    dir="$(dirname "$dir")"
+  done
+}
+
 @test "linux runtime: default network allows localhost TCP connect" {
   require_linux_bwrap
   command -v node >/dev/null 2>&1 || skip "node not installed"

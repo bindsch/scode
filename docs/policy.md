@@ -19,7 +19,10 @@ macOS strict permits reads from `/usr`, `/opt`, `/System`, `/Library`,
 `/private/var/db`, `/private/var/run`, `/private/var/select`,
 `/private/etc`, `/dev`, `/bin`, `/sbin`, and `/etc`. It imports Apple's
 private `system.sb` and allows process execution/fork, sysctl reads, and Mach
-lookup. These are material runtime exceptions to deny-default.
+lookup. These are material runtime exceptions to deny-default. Strict mode
+also permits metadata-only reads (`file-read-metadata`) of the home and of
+every ancestor directory of a granted path, so a harness can stat and
+canonicalize its way to a grant; contents outside grants stay denied.
 
 Linux supplies private `/proc` and `/dev`. Its default runtime bind requires
 `XDG_RUNTIME_DIR` to resolve to `/run/user/$UID`, owned by the user with mode
