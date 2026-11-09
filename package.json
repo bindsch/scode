@@ -13,5 +13,9 @@
   "devDependencies": {
     "c8": "^11.0.0",
     "fast-check": "^4.9.0"
+  },
+  "overrides": {
+    "glob": "^14.0.4",
+    "minimatch": "^11.0.5"
   }
 }

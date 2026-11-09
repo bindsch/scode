@@ -17,6 +17,11 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   even though that directory was granted read-write: canonicalizing the path
   stats each ancestor, and those stats were denied.
 
+### Development
+
+- Dev dependencies pin glob 14.0.4 and minimatch 11.0.5 through npm overrides, clearing the
+  moderate advisories in c8's test-exclude chain so `npm audit --audit-level=low` passes again.
+
 ## [0.6.2] - 2026-10-28
 
 ### Fixed
