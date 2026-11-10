@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.6.4).** Defaults and compatibility may change.
+> **Beta software (v0.6.5).** Defaults and compatibility may change.
 
 scode runs commands inside an OS sandbox on macOS or Linux. It uses a shared
 policy for coding tools without a daemon or container service.
