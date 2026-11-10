@@ -472,17 +472,19 @@ make_symlinked_home_fixture() {
   local base
   base="$(realpath "$TEST_PROJECT")"
   make_symlinked_home_fixture "$base"
+  # Results are counters printed as "leaks=N": under kcov the trace echoes this
+  # script's text, so the expected output must not appear in that text.
   HOME="$base/home" run "$SCODE" -C "$base/proj" -- bash -c '
+    unset leaks
     for f in "$HOME/.aws/credentials" "$HOME/dotfiles/aws/credentials" \
              "$HOME/.netrc" "$HOME/dotfiles/netrc" "$HOME/.config/gh/hosts.yml"; do
-      if cat "$f" 2>/dev/null | grep -q secret; then echo "LEAK $f"; fi
+      if cat "$f" 2>/dev/null | grep -q secret; then leaks=$((leaks + 1)); fi
     done
     echo planted > "$HOME/.yarnrc" 2>/dev/null
     echo planted > "$HOME/.npmrc" 2>/dev/null
-    echo started'
+    echo "leaks=$((leaks + 0))"'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"started"* ]]
-  [[ "$output" != *"LEAK"* ]]
+  [[ "$output" == *"leaks=0"* ]]
   # Writes through the dangling links never reach the host.
   [[ ! -f "$base/home/gone/yarnrc" ]]
   [[ ! -f "$base/home/dotfiles/npmrc" ]]
@@ -499,17 +501,17 @@ make_symlinked_home_fixture() {
     if [[ -e "$tool" ]]; then found+=("$tool"); fi
   done
   [[ ${#found[@]} -gt 0 ]] || skip "no privilege tool installed on this host"
+  # Counters, not marker words: see the symlinked-blocks runtime test.
   run "$SCODE" -C "$TEST_PROJECT" -- bash -c '
+    unset readable ran
     for t in "$@"; do
-      if [ -s "$t" ]; then echo "READABLE $t"; fi
+      if [ -s "$t" ]; then readable=$((readable + 1)); fi
       "$t" --help >/dev/null 2>&1; rc=$?
-      [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || echo "RAN $t rc=$rc"
+      if [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ]; then ran=$((ran + 1)); fi
     done
-    echo started' scode-priv-check "${found[@]}"
+    echo "readable=$((readable + 0)) ran=$((ran + 0))"' scode-priv-check "${found[@]}"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"started"* ]]
-  [[ "$output" != *"READABLE"* ]]
-  [[ "$output" != *"RAN"* ]]
+  [[ "$output" == *"readable=0 ran=0"* ]]
 }
 
 # ---------- Linux: XDG_RUNTIME_DIR ----------
