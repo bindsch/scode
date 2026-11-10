@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.3"
+readonly PROGRAM_VERSION="0.6.4"
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -3518,7 +3518,11 @@ EOF
 # case, so a mount on a link name always lands on its target: the canonical
 # path is the one destination bwrap accepts, and a mask there covers every
 # link that names it. Sets BWRAP_MOUNT_PATH; fails on a link cycle, which
-# names no object to protect. A normalized absolute path with no link
+# names no object to protect. Only links up to the nearest existing ancestor
+# can be resolved: a missing suffix is appended as given, so a dangling link
+# in a non-final component would remain. The Linux enforceability check drops
+# or refuses every block whose parent is missing before a builder runs, which
+# keeps such a path from reaching a mount. A normalized absolute path with no link
 # component is returned as is without forking, since the profile builders
 # call this for every default block.
 BWRAP_MOUNT_PATH=""

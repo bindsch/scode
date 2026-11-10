@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-10
+
 ### Fixed
 
 - Linux sandboxes start on Ubuntu 26.04. There `/usr/bin/sudo` is an absolute
@@ -19,7 +21,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   (a dotfile manager's `~/.aws` or `~/.config`): they also failed to start
   before. A missing privilege tool or a dangling link to one is skipped.
 - Linux also masks the classic `sudo.ws` and the sudo-rs names (`sudo-rs`,
-  `su-rs`, `sudoedit`, and the binaries in `/usr/lib/cargo/bin`), so a host with
+  `su-rs`, `sudoedit`, `sudoedit-rs`, and the binaries in `/usr/lib/cargo/bin`), so a host with
   both sudo implementations installed exposes neither.
 - A block whose link resolves into the project, or into a strict-mode grant,
   is reasserted after the project bind; an allowed child of a linked block is
