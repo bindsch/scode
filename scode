@@ -572,6 +572,113 @@ paths_overlap_hierarchy() {
   is_same_or_descendant_path "$1" "$2" || is_same_or_descendant_path "$2" "$1"
 }
 
+# -------- Link spellings --------
+
+# A path names an object through every symbolic link on the way to it, and a
+# rule written for one spelling does not cover the others. Seatbelt matches a
+# file operation against the path the kernel resolved, so a macOS deny on
+# ~/.aws alone leaves ~/dotfiles/aws, its target, readable. The helpers below
+# list every spelling a block needs.
+LINK_SPELLINGS=()
+LINK_CANONICAL=""
+
+_link_spelling_add() {
+  local candidate="$1" seen
+  for seen in ${LINK_SPELLINGS[@]+"${LINK_SPELLINGS[@]}"}; do
+    [[ "$seen" == "$candidate" ]] && return 0
+  done
+  LINK_SPELLINGS+=("$candidate")
+}
+
+# A spelling is kept only when it is absolute and has no empty, ".", or ".."
+# component. Collapsing ".." lexically after a link would name a different
+# object than the kernel reaches; the canonical spelling covers that case.
+_link_spelling_is_clean() {
+  case "$1" in
+    /) return 0 ;;
+    /*//*|*/./*|*/../*|*/.|*/..) return 1 ;;
+    /*) return 0 ;;
+  esac
+  return 1
+}
+
+# path_link_spellings PATH
+# Resolve PATH one link at a time, as the kernel does, and set LINK_SPELLINGS
+# to every name met on the way: PATH itself, the path after each link is
+# replaced by its target (a link in the final component or in any ancestor,
+# including one reached through ".."), and the canonical path, which is also
+# set in LINK_CANONICAL. A missing
+# component ends resolution of that component and the rest is kept as
+# written, so a missing path or a dangling link yields the path its creation
+# would use. Fails on a relative PATH, an unreadable link, or more than 40
+# links (a cycle); LINK_SPELLINGS then holds the names found so far and
+# LINK_CANONICAL is empty. Forks only to read a link.
+path_link_spellings() {
+  local path="$1" resolved="" rest comp cand target spelled hops=0
+  LINK_SPELLINGS=()
+  LINK_CANONICAL=""
+  [[ "$path" == /* ]] || return 1
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+  _link_spelling_is_clean "$path" && _link_spelling_add "$path"
+  rest="${path#/}"
+  while [[ -n "$rest" ]]; do
+    # resolved holds no link, so resolved/rest names the same object as PATH
+    # at every step; keep each clean one (a link reached after "..").
+    spelled="${resolved}/${rest}"
+    while [[ "$spelled" != "/" && "$spelled" == */ ]]; do
+      spelled="${spelled%/}"
+    done
+    _link_spelling_is_clean "$spelled" && _link_spelling_add "$spelled"
+    if [[ "$rest" == */* ]]; then
+      comp="${rest%%/*}"
+      rest="${rest#*/}"
+    else
+      comp="$rest"
+      rest=""
+    fi
+    case "$comp" in
+      ""|.) continue ;;
+      ..) resolved="${resolved%/*}"; continue ;;
+    esac
+    cand="${resolved}/${comp}"
+    if [[ -L "$cand" ]]; then
+      hops=$((hops + 1))
+      [[ "$hops" -le 40 ]] || return 1
+      target="$(/usr/bin/readlink "$cand" 2>/dev/null)" || return 1
+      [[ -n "$target" ]] || return 1
+      if [[ "$target" == /* ]]; then
+        resolved=""
+        target="${target#/}"
+      fi
+      rest="${target}${rest:+/${rest}}"
+    else
+      resolved="$cand"
+    fi
+  done
+  LINK_CANONICAL="${resolved:-/}"
+  _link_spelling_add "$LINK_CANONICAL"
+}
+
+# The absolute spelling of an access path as the user wrote it, before links
+# are resolved: ~ expanded, a relative path anchored to BASE_DIR, and "." and
+# empty components dropped. resolve_access_path canonicalizes blocks, which
+# loses the link name; this keeps it so the name is blocked too. Prints
+# nothing when the path contains "..", which only resolution can interpret.
+written_access_path() {
+  local p="$1" base_dir="$2"
+  if [[ "$p" =~ ^~(/|$) ]]; then
+    p="${HOME}${p:1}"
+  elif [[ "$p" != /* ]]; then
+    p="${base_dir}/${p}"
+  fi
+  case "${p}/" in
+    */../*) return 0 ;;
+  esac
+  _collapse_absolute_path "$p"
+}
+
 # -------- Platform detection --------
 
 detect_platform() {
@@ -3014,6 +3121,92 @@ audit_watch() {
   done
 }
 
+# SCODE_COVERAGE_EXCLUDE_START
+# Seatbelt matches a rule against the path the kernel resolved, so a block
+# must name every spelling of its object: the name as written (a link), each
+# path met while its links resolve, and the canonical target.
+# ALL_BLOCKED_SPELLINGS holds them per block, newline-separated, in parallel
+# with ALL_BLOCKED; an unset entry falls back to the block path itself.
+MACOS_BLOCK_SPELLINGS=()
+macos_block_spellings() {
+  local index="$1" joined line
+  MACOS_BLOCK_SPELLINGS=()
+  joined="${ALL_BLOCKED_SPELLINGS[$index]:-}"
+  if [[ -z "$joined" ]]; then
+    [[ -n "${ALL_BLOCKED[$index]:-}" ]] && MACOS_BLOCK_SPELLINGS=("${ALL_BLOCKED[$index]}")
+    return 0
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && MACOS_BLOCK_SPELLINGS+=("$line")
+  done <<< "$joined"
+  return 0
+}
+
+# Fork-free hierarchy tests for normalized absolute paths.
+_path_same_or_under() {
+  [[ "$1" == "$2" || "$1" == "${2%/}/"* ]]
+}
+_path_strictly_under() {
+  [[ "$1" != "$2" && "$1" == "${2%/}/"* ]]
+}
+
+# macos_path_in_block PATH INDEX [strict]: PATH is the same as (unless
+# strict) or inside a spelling of block INDEX.
+macos_path_in_block() {
+  local path="$1" index="$2" mode="${3:-same}" spelling
+  macos_block_spellings "$index"
+  for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
+    if [[ "$mode" == "strict" ]]; then
+      _path_strictly_under "$path" "$spelling" && return 0
+    else
+      _path_same_or_under "$path" "$spelling" && return 0
+    fi
+  done
+  return 1
+}
+
+# Print the deny rule for block INDEX over all of its spellings.
+emit_macos_block_deny() {
+  local spelling
+  macos_block_spellings "$1"
+  [[ ${MACOS_BLOCK_SPELLINGS[0]+_} ]] || return 0
+  echo "(deny file-read* file-write* process-exec"
+  for spelling in "${MACOS_BLOCK_SPELLINGS[@]}"; do
+    printf '  (subpath "%s")\n' "$(sbpl_escape "$spelling")"
+  done
+  echo ")"
+}
+
+# emit_macos_redeny_inside SCOPE GRANT...: deny again every block (SCOPE is
+# "all" or "custom") with a spelling strictly inside one of the GRANTs. The
+# last matching Seatbelt rule wins, so a grant emitted after a block reopens
+# whatever the block named inside it, including a link's resolved target.
+emit_macos_redeny_inside() {
+  local scope="$1" i spelling grant hit
+  shift
+  [[ $# -gt 0 ]] || return 0
+  for i in "${!ALL_BLOCKED[@]}"; do
+    [[ -n "${ALL_BLOCKED[$i]}" ]] || continue
+    if [[ "$scope" == "custom" ]]; then
+      case "${ALL_BLOCKED_SOURCES[$i]:-}" in config|project|cli|defense) ;; *) continue ;; esac
+    fi
+    macos_block_spellings "$i"
+    hit=0
+    for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
+      for grant in "$@"; do
+        [[ -n "$grant" ]] || continue
+        if _path_strictly_under "$spelling" "$grant"; then
+          hit=1
+          break 2
+        fi
+      done
+    done
+    [[ "$hit" -eq 1 ]] && emit_macos_block_deny "$i"
+  done
+  return 0
+}
+# SCODE_COVERAGE_EXCLUDE_END
+
 # These profile-emission functions remain excluded from kcov measurement.
 # Both platforms collect coverage; macOS profile and runtime tests exercise
 # this block, but its lines do not contribute to the reported percentage.
@@ -3024,7 +3217,8 @@ audit_watch() {
 emit_macos_final_guards() {
   local project_dir="$1"
   local fs_mode="$2"
-  local emitted=0 i dir source bdir under_custom esc_dir esc_project
+  local emitted=0 i j dir source under_custom esc_dir esc_project
+  local -a reallowed=()
 
   for i in "${!ALL_BLOCKED[@]}"; do
     source="${ALL_BLOCKED_SOURCES[$i]}"
@@ -3034,12 +3228,7 @@ emit_macos_final_guards() {
       echo "; Final custom-policy blocks"
       emitted=1
     fi
-    esc_dir="$(sbpl_escape "${ALL_BLOCKED[$i]}")"
-    cat <<EOF
-(deny file-read* file-write* process-exec
-  (subpath "${esc_dir}")
-)
-EOF
+    emit_macos_block_deny "$i"
   done
 
   if [[ "$emitted" -eq 1 && ${ALL_ALLOWED[0]+_} ]]; then
@@ -3048,8 +3237,8 @@ EOF
       case "$source" in cli|config) ;; *) continue ;; esac
       dir="${ALL_ALLOWED[$i]}"
       under_custom=0
-      for bdir in "${ALL_BLOCKED[@]}"; do
-        if is_descendant_path "$dir" "$bdir"; then
+      for j in "${!ALL_BLOCKED[@]}"; do
+        if macos_path_in_block "$dir" "$j" strict; then
           under_custom=1
           break
         fi
@@ -3061,7 +3250,10 @@ EOF
   (subpath "${esc_dir}")
 )
 EOF
+      reallowed+=("$dir")
     done
+    # A restored child allow must not reopen a custom block inside it.
+    emit_macos_redeny_inside custom ${reallowed[@]+"${reallowed[@]}"}
   fi
 
   if [[ "$fs_mode" == "ro" ]]; then
@@ -3128,20 +3320,14 @@ EOF
 EOF
   fi
 
-  # Blocked directories
+  # Blocked directories, each over every spelling of its path
+  local i
+  local -a grants=()
   if [[ ${#blocked[@]} -gt 0 ]]; then
     echo ""
     echo "; Blocked directories"
-    for dir in "${blocked[@]}"; do
-      if [[ -n "$dir" ]]; then
-        local esc_dir
-        esc_dir="$(sbpl_escape "$dir")"
-        cat <<EOF
-(deny file-read* file-write* process-exec
-  (subpath "${esc_dir}")
-)
-EOF
-      fi
+    for i in "${!blocked[@]}"; do
+      [[ -n "${blocked[$i]}" ]] && emit_macos_block_deny "$i"
     done
   fi
 
@@ -3167,6 +3353,7 @@ EOF
   (subpath "${esc_dir}")
 )
 EOF
+          grants+=("$dir")
         fi
       done
       echo ""
@@ -3180,8 +3367,10 @@ EOF
   (subpath "${esc_dir}")
 )
 EOF
+          grants+=("$dir")
         fi
       done
+      emit_macos_redeny_inside all ${grants[@]+"${grants[@]}"}
     fi
   fi
 
@@ -3192,8 +3381,8 @@ EOF
   # under project_dir are re-denied so --block on project subdirs still works.
   if [[ ${#blocked[@]} -gt 0 ]]; then
     local under_block=0
-    for bdir in "${blocked[@]}"; do
-      if [[ "$project_dir" == "$bdir"/* || "$project_dir" == "$bdir" ]]; then
+    for i in "${!blocked[@]}"; do
+      if macos_path_in_block "$project_dir" "$i"; then
         under_block=1
         break
       fi
@@ -3218,18 +3407,9 @@ EOF
 )
 EOF
       fi
-      # Re-deny blocked subdirectories within the project (later rules win)
-      for bdir in "${blocked[@]}"; do
-        if [[ "$bdir" == "$project_dir"/* ]]; then
-          local esc_bdir
-          esc_bdir="$(sbpl_escape "$bdir")"
-          cat <<EOF
-(deny file-read* file-write* process-exec
-  (subpath "${esc_bdir}")
-)
-EOF
-        fi
-      done
+      # Re-deny blocks inside the project (later rules win), including a
+      # block whose link resolves into the project.
+      emit_macos_redeny_inside all "$project_dir"
     fi
   fi
 
@@ -3239,12 +3419,13 @@ EOF
   # (otherwise it's already allowed by the default-allow policy).
   if [[ ${ALL_ALLOWED[0]+_} && ${blocked[0]+_} ]]; then
     local emitted_header=0
+    grants=()
     for dir in "${ALL_ALLOWED[@]}"; do
       [[ -z "$dir" ]] && continue
-      # Check if this allowed path falls under any blocked dir
+      # Check if this allowed path falls under any spelling of a blocked dir
       local under_block=0
-      for bdir in "${blocked[@]}"; do
-        if [[ "$dir" == "$bdir"/* ]]; then
+      for i in "${!blocked[@]}"; do
+        if macos_path_in_block "$dir" "$i" strict; then
           under_block=1
           break
         fi
@@ -3262,8 +3443,11 @@ EOF
   (subpath "${esc_dir}")
 )
 EOF
+        grants+=("$dir")
       fi
     done
+    # A child allow must not reopen another block named inside it.
+    emit_macos_redeny_inside all ${grants[@]+"${grants[@]}"}
   fi
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
@@ -3450,13 +3634,7 @@ EOF
         echo "; Blocked directories"
         emitted_header=1
       fi
-      local esc_dir
-      esc_dir="$(sbpl_escape "$dir")"
-      cat <<EOF
-(deny file-read* file-write* process-exec
-  (subpath "${esc_dir}")
-)
-EOF
+      emit_macos_block_deny "$i"
     done
   fi
 
@@ -5097,13 +5275,24 @@ RESOLVED_CONFIG_ALLOWED=()
 for dir in ${CONFIG_ALLOWED[@]+"${CONFIG_ALLOWED[@]}"}; do
   RESOLVED_CONFIG_ALLOWED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
 done
+# Blocks are canonicalized for policy comparisons. The *_WRITTEN arrays keep
+# each block's spelling before link resolution (empty when it is the same),
+# so the sandbox can deny a link name as well as its target.
 RESOLVED_CLI_BLOCKED=()
+RESOLVED_CLI_BLOCKED_WRITTEN=()
 for dir in ${CLI_BLOCKED[@]+"${CLI_BLOCKED[@]}"}; do
   RESOLVED_CLI_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
+  _written_block="$(written_access_path "$dir" "$PROJECT_DIR")"
+  [[ "$_written_block" == "${RESOLVED_CLI_BLOCKED[${#RESOLVED_CLI_BLOCKED[@]}-1]}" ]] && _written_block=""
+  RESOLVED_CLI_BLOCKED_WRITTEN+=("$_written_block")
 done
 RESOLVED_CONFIG_BLOCKED=()
+RESOLVED_CONFIG_BLOCKED_WRITTEN=()
 for dir in ${CONFIG_BLOCKED[@]+"${CONFIG_BLOCKED[@]}"}; do
   RESOLVED_CONFIG_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
+  _written_block="$(written_access_path "$dir" "$PROJECT_DIR")"
+  [[ "$_written_block" == "${RESOLVED_CONFIG_BLOCKED[${#RESOLVED_CONFIG_BLOCKED[@]}-1]}" ]] && _written_block=""
+  RESOLVED_CONFIG_BLOCKED_WRITTEN+=("$_written_block")
 done
 GROK_MANDATORY_BLOCKED=()
 if [[ "$GROK_DEFENSE" -eq 1 && "$DETECTED_HARNESS" == "grok" ]]; then
@@ -5128,8 +5317,12 @@ for dir in ${PROJECT_ALLOWED[@]+"${PROJECT_ALLOWED[@]}"}; do
   RESOLVED_PROJECT_ALLOWED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
 done
 RESOLVED_PROJECT_BLOCKED=()
+RESOLVED_PROJECT_BLOCKED_WRITTEN=()
 for dir in ${PROJECT_BLOCKED[@]+"${PROJECT_BLOCKED[@]}"}; do
   RESOLVED_PROJECT_BLOCKED+=("$(resolve_access_path "$dir" "$PROJECT_DIR")")
+  _written_block="$(written_access_path "$dir" "$PROJECT_DIR")"
+  [[ "$_written_block" == "${RESOLVED_PROJECT_BLOCKED[${#RESOLVED_PROJECT_BLOCKED[@]}-1]}" ]] && _written_block=""
+  RESOLVED_PROJECT_BLOCKED_WRITTEN+=("$_written_block")
 done
 
 # Project allow rules are never authoritative. An allow already covered by a
@@ -5305,59 +5498,84 @@ if [[ ${GROK_MANDATORY_BLOCKED[0]+_} && ${ALL_ALLOWED[0]+_} ]]; then
   done
 fi
 
+# Built-in blocks are written with link names ($HOME/.aws), while allows are
+# canonical. An allow of a built-in block's resolved target, or of an ancestor
+# of it, lifts the block just as an allow of the name itself does: otherwise
+# `--allow ~/.aws` would resolve to ~/dotfiles/aws and the built-in block,
+# now enforced at that target, would override it.
+is_builtin_block_allowed() {
+  is_allowed "$1" && return 0
+  [[ ${ALL_ALLOWED[0]+_} ]] || return 1
+  path_link_spellings "$1" || return 1
+  [[ -n "$LINK_CANONICAL" && "$LINK_CANONICAL" != "$1" ]] || return 1
+  is_allowed "$LINK_CANONICAL"
+}
+
 # Build blocked list: defaults + platform extras + config + CLI, minus allowed
 # ALL_BLOCKED_SOURCES tracks the origin of each entry (parallel array).
+# ALL_BLOCKED_ALIASES holds a custom block's spelling before link resolution,
+# or an empty string when there is none (parallel array).
 ALL_BLOCKED=()
 ALL_BLOCKED_SOURCES=()
+ALL_BLOCKED_ALIASES=()
 
 # Start with defaults
 for dir in "${DEFAULT_BLOCKED[@]}"; do
-  if ! is_allowed "$dir"; then
+  if ! is_builtin_block_allowed "$dir"; then
     ALL_BLOCKED+=("$dir")
     ALL_BLOCKED_SOURCES+=("default")
+    ALL_BLOCKED_ALIASES+=("")
   fi
 done
 
 # Platform extras
 if [[ "$PLATFORM" == "darwin" ]]; then
   for dir in "${DARWIN_EXTRA_BLOCKED[@]}"; do
-    if ! is_allowed "$dir"; then
+    if ! is_builtin_block_allowed "$dir"; then
       ALL_BLOCKED+=("$dir")
       ALL_BLOCKED_SOURCES+=("platform")
+      ALL_BLOCKED_ALIASES+=("")
     fi
   done
 elif [[ "$PLATFORM" == "linux" ]]; then
   for dir in "${LINUX_EXTRA_BLOCKED[@]}"; do
-    if ! is_allowed "$dir"; then
+    if ! is_builtin_block_allowed "$dir"; then
       ALL_BLOCKED+=("$dir")
       ALL_BLOCKED_SOURCES+=("platform")
+      ALL_BLOCKED_ALIASES+=("")
     fi
   done
 fi
 
 # Config blocked
-for dir in ${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}; do
+for _blocked_i in "${!RESOLVED_CONFIG_BLOCKED[@]}"; do
+  dir="${RESOLVED_CONFIG_BLOCKED[$_blocked_i]}"
   if ! is_allowed "$dir"; then
     ALL_BLOCKED+=("$dir")
     ALL_BLOCKED_SOURCES+=("config")
+    ALL_BLOCKED_ALIASES+=("${RESOLVED_CONFIG_BLOCKED_WRITTEN[$_blocked_i]}")
   fi
 done
 
 # Project blocked
-for dir in ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
+for _blocked_i in "${!RESOLVED_PROJECT_BLOCKED[@]}"; do
+  dir="${RESOLVED_PROJECT_BLOCKED[$_blocked_i]}"
   if ! is_allowed "$dir"; then
     ALL_BLOCKED+=("$dir")
     ALL_BLOCKED_SOURCES+=("project")
+    ALL_BLOCKED_ALIASES+=("${RESOLVED_PROJECT_BLOCKED_WRITTEN[$_blocked_i]}")
   fi
 done
 
 # CLI blocked
 # CLI --block has higher precedence than config/default allows.
 # CLI --allow still wins over CLI --block.
-for dir in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}; do
+for _blocked_i in "${!RESOLVED_CLI_BLOCKED[@]}"; do
+  dir="${RESOLVED_CLI_BLOCKED[$_blocked_i]}"
   if ! is_cli_allowed "$dir"; then
     ALL_BLOCKED+=("$dir")
     ALL_BLOCKED_SOURCES+=("cli")
+    ALL_BLOCKED_ALIASES+=("${RESOLVED_CLI_BLOCKED_WRITTEN[$_blocked_i]}")
   fi
 done
 
@@ -5365,7 +5583,46 @@ done
 for dir in ${GROK_MANDATORY_BLOCKED[@]+"${GROK_MANDATORY_BLOCKED[@]}"}; do
   ALL_BLOCKED+=("$dir")
   ALL_BLOCKED_SOURCES+=("defense")
+  ALL_BLOCKED_ALIASES+=("")
 done
+
+# macOS: Seatbelt matches the path the kernel resolved, so each block is
+# denied under every spelling of its path: the link name as written (the
+# block itself, or a custom block's spelling before resolution), each path
+# met while its links resolve, and the canonical target. Linux mounts each
+# block on its canonical path instead (bwrap_mount_path).
+ALL_BLOCKED_SPELLINGS=()
+if [[ "$PLATFORM" == "darwin" ]]; then
+  for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+    _block_spellings=()
+    for _block_name in "${ALL_BLOCKED_ALIASES[$_blocked_i]}" "${ALL_BLOCKED[$_blocked_i]}"; do
+      [[ -n "$_block_name" ]] || continue
+      path_link_spellings "$_block_name" || true
+      for _spelling in ${LINK_SPELLINGS[@]+"${LINK_SPELLINGS[@]}"}; do
+        _spelling_seen=0
+        for _prior in ${_block_spellings[@]+"${_block_spellings[@]}"}; do
+          [[ "$_prior" == "$_spelling" ]] && { _spelling_seen=1; break; }
+        done
+        [[ "$_spelling_seen" -eq 0 ]] && _block_spellings+=("$_spelling")
+      done
+    done
+    _joined_spellings=""
+    for _spelling in ${_block_spellings[@]+"${_block_spellings[@]}"}; do
+      _joined_spellings+="${_spelling}"$'\n'
+    done
+    ALL_BLOCKED_SPELLINGS+=("$_joined_spellings")
+  done
+fi
+
+# Succeeds when PATH is the same as or inside block INDEX: on macOS under any
+# spelling of the block, elsewhere under the block path.
+path_in_block() {
+  if [[ "$PLATFORM" == "darwin" ]]; then
+    macos_path_in_block "$1" "$2"
+  else
+    is_same_or_descendant_path "$1" "${ALL_BLOCKED[$2]}"
+  fi
+}
 
 # The project bind is an implicit allow needed to execute the requested task.
 # An authoritative block covering it cannot be implemented without silently
@@ -5375,7 +5632,7 @@ for _blocked_i in "${!ALL_BLOCKED[@]}"; do
     config|project|cli|defense) ;;
     *) continue ;;
   esac
-  if is_same_or_descendant_path "$PROJECT_DIR" "${ALL_BLOCKED[$_blocked_i]}"; then
+  if path_in_block "$PROJECT_DIR" "$_blocked_i"; then
     error "custom block covers the project directory: ${ALL_BLOCKED[$_blocked_i]}"
     error "remove the block or add an authoritative allow for the project"
     exit 1
@@ -5390,6 +5647,7 @@ done
 if [[ "$PLATFORM" == "linux" ]]; then
   _enforceable_blocked=()
   _enforceable_blocked_sources=()
+  _enforceable_blocked_aliases=()
   _unavailable_default_blocks=0
   for _blocked_i in "${!ALL_BLOCKED[@]}"; do
     dir="${ALL_BLOCKED[$_blocked_i]}"
@@ -5424,12 +5682,15 @@ if [[ "$PLATFORM" == "linux" ]]; then
     fi
     _enforceable_blocked+=("$dir")
     _enforceable_blocked_sources+=("$_block_source")
+    _enforceable_blocked_aliases+=("${ALL_BLOCKED_ALIASES[$_blocked_i]}")
   done
   ALL_BLOCKED=()
   ALL_BLOCKED_SOURCES=()
+  ALL_BLOCKED_ALIASES=()
   if [[ ${_enforceable_blocked[0]+_} ]]; then
     ALL_BLOCKED=("${_enforceable_blocked[@]}")
     ALL_BLOCKED_SOURCES=("${_enforceable_blocked_sources[@]}")
+    ALL_BLOCKED_ALIASES=("${_enforceable_blocked_aliases[@]}")
   fi
   if [[ "$_unavailable_default_blocks" -gt 0 ]]; then
     warning "${_unavailable_default_blocks} built-in Linux block(s) are currently inapplicable because their parents do not exist"
@@ -5527,10 +5788,12 @@ if [[ -n "${SCODE_LIB_DIR}" && -f "${SCODE_LIB_DIR}/no-sandbox.js" ]]; then
   SCODE_NO_SANDBOX_JS="${SCODE_LIB_DIR}/no-sandbox.js"
   validate_path "$SCODE_NO_SANDBOX_JS"
   _preload_custom_block=0
+  _preload_real="$(_realpath "$SCODE_NO_SANDBOX_JS")"
   for _blocked_i in "${!ALL_BLOCKED[@]}"; do
     case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
       config|project|cli|defense)
-        if is_same_or_descendant_path "$SCODE_NO_SANDBOX_JS" "${ALL_BLOCKED[$_blocked_i]}"; then
+        if path_in_block "$SCODE_NO_SANDBOX_JS" "$_blocked_i" || \
+           path_in_block "$_preload_real" "$_blocked_i"; then
           _preload_custom_block=1
           break
         fi
@@ -5609,7 +5872,7 @@ if [[ -n "${COMMAND_BINARY_PATH}" ]]; then
   for _blocked_i in "${!ALL_BLOCKED[@]}"; do
     case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
       config|project|cli|defense)
-        if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "${ALL_BLOCKED[$_blocked_i]}"; then
+        if path_in_block "${COMMAND_BINARY_PATH}" "$_blocked_i"; then
           _command_has_custom_block=1
           break
         fi
@@ -5640,8 +5903,7 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     else
     for _blocked_i in "${!ALL_BLOCKED[@]}"; do
       case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in default|platform) ;; *) continue ;; esac
-      _bdir="${ALL_BLOCKED[$_blocked_i]}"
-      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "$_bdir"; then
+      if macos_path_in_block "${COMMAND_BINARY_PATH}" "$_blocked_i"; then
         _esc_bin="$(sbpl_escape "${COMMAND_BINARY_PATH}")"
         PROFILE="${PROFILE}
 

@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS blocks now cover the resolved target of a symbolic link. Seatbelt
+  matches the path the kernel resolved, and the profile named only the link,
+  so with `~/.aws` linked to `~/dotfiles/aws`, `cat ~/dotfiles/aws/credentials`
+  printed the secret inside the sandbox; a block under a linked ancestor such
+  as `~/.config/gh` was readable even through its own name. Every deny rule
+  now lists the link name, each path met while links resolve, and the
+  canonical target. Dangling links are denied at their target path and link
+  cycles under every name. Custom blocks keep the name the user wrote as well
+  as the canonical path.
+- On macOS a later grant (the project override, a `~/Library` carve-out, or a
+  child allow) is followed by a deny for every block spelling inside it, so it
+  cannot reopen a block's resolved target. The project, preload, and command
+  binary checks compare every spelling of a block.
+- An allow of a built-in block's link name, or of its resolved target, lifts
+  that block on macOS and Linux. Allows are canonical and built-in blocks are
+  not, so `--allow ~/.aws` used to leave the block in place, which Linux 0.6.4
+  then enforced at the resolved target.
+
 ## [0.6.4] - 2026-11-10
 
 ### Fixed

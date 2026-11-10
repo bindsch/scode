@@ -106,6 +106,21 @@ on Ubuntu 26.04, or a dotfile manager's `~/.aws` link. A missing privilege tool
 or a dangling link to one is skipped. A dangling link in a block list is
 blocked at its target path, or at the topmost missing directory above the
 target, so neither the target nor its parents can be created in the sandbox.
+
+On macOS Seatbelt matches a rule against the path the kernel resolved, so a
+deny on a link name alone does not protect the link's target. Through v0.6.4,
+with `~/.aws` linked to `~/dotfiles/aws`, `cat ~/dotfiles/aws/credentials`
+printed the secret inside the sandbox. Every macOS deny rule now names each
+spelling of the blocked path: the link name as written, each path met while
+its links resolve (a link in the final component, in an ancestor such as
+`~/.config`, or in a chain of links), and the canonical target. A dangling link
+is denied at the target path its creation would use; a link cycle is denied
+under every name in it. A custom block keeps its spelling before resolution as
+well as its canonical path. Later grants (the project override, `~/Library`
+carve-outs, and child allows) are followed by a deny for any block spelling
+inside them, so a grant never reopens a block's resolved target. An allow of a
+built-in block's link name or of its resolved target lifts that block on both
+platforms, as an allow of the literal path already did.
 Releases through v0.6.0 could reopen these with later grants; the working tree
 reasserts them after grants. These restrictions do not identify renamed copies
 or every privilege mechanism and do not replace the OS user boundary.
