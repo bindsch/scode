@@ -202,6 +202,25 @@ DARWIN_EXTRA_BLOCKED=(
 DARWIN_LIBRARY_ALLOWED_RW=()
 DARWIN_LIBRARY_ALLOWED_RO=()
 
+# Linux privilege tools masked inside the sandbox. Ubuntu 26.04 ships sudo-rs:
+# /usr/bin/sudo is an alternatives link to /usr/lib/cargo/bin/sudo, and the
+# classic sudo stays installed as /usr/bin/sudo.ws, so both implementations
+# and their -rs names are listed. Links are masked at their resolved target.
+LINUX_PRIVILEGE_TOOLS=(
+  /usr/bin/sudo
+  /usr/bin/sudoedit
+  /usr/bin/sudo.ws
+  /usr/bin/sudo-rs
+  /usr/bin/sudoedit-rs
+  /usr/bin/su
+  /usr/bin/su-rs
+  /usr/lib/cargo/bin/sudo
+  /usr/lib/cargo/bin/su
+  /usr/bin/login
+  /usr/bin/doas
+  /usr/bin/pkexec
+)
+
 # Env var patterns to scrub with --scrub-env
 SCRUB_PATTERNS=(
   # Cloud providers
@@ -571,6 +590,14 @@ detect_platform() {
         ;;
       *) error "invalid internal platform override: ${_SCODE_PLATFORM}"; exit 1 ;;
     esac
+  fi
+  # _SCODE_PRIVILEGE_ROOT is a dry-run-only test hook that relocates the
+  # privilege-tool masks under a fixture root, so tests can exercise symlinked
+  # tools without touching the host's /usr/bin. A runtime run must never move
+  # the masks away from the real binaries.
+  if [[ -n "${_SCODE_PRIVILEGE_ROOT:-}" && "${DRY_RUN:-0}" -ne 1 ]]; then
+    error "internal privilege root override is only permitted with --dry-run"
+    exit 1
   fi
   case "$(uname -s)" in
     Darwin) PLATFORM="darwin" ;;
@@ -3483,18 +3510,83 @@ EOF
 }
 # SCODE_COVERAGE_EXCLUDE_END
 
-# Append one fail-closed bubblewrap mask. Directories use an empty tmpfs;
-# existing non-directories (regular files, sockets, FIFOs, devices, and links)
-# use an inert file bind so sandbox startup does not fail on the node type.
+# Print the destination bubblewrap must mount on to cover PATH: PATH with
+# every symbolic link resolved, including the final component and a dangling
+# final link. bwrap resolves a destination inside its staging root, so an
+# absolute link anywhere on the path points outside the new root and the mount
+# fails ("Can't create file at /usr/bin/sudo"). mount(2) follows links in any
+# case, so a mount on a link name always lands on its target: the canonical
+# path is the one destination bwrap accepts, and a mask there covers every
+# link that names it. Sets BWRAP_MOUNT_PATH; fails on a link cycle, which
+# names no object to protect. A normalized absolute path with no link
+# component is returned as is without forking, since the profile builders
+# call this for every default block.
+BWRAP_MOUNT_PATH=""
+bwrap_mount_path() {
+  local path="$1" prefix="" rest
+  BWRAP_MOUNT_PATH=""
+  [[ -n "$path" ]] || return 1
+  case "$path" in
+    /) BWRAP_MOUNT_PATH="/"; return 0 ;;
+    /*//*|*/./*|*/../*|*/.|*/..|*/) ;;
+    /*)
+      rest="${path#/}"
+      while [[ -n "$rest" ]]; do
+        prefix+="/${rest%%/*}"
+        [[ -L "$prefix" ]] && break
+        if [[ "$rest" == */* ]]; then rest="${rest#*/}"; else rest=""; fi
+      done
+      if [[ -z "$rest" ]]; then
+        BWRAP_MOUNT_PATH="$path"
+        return 0
+      fi
+      ;;
+  esac
+  BWRAP_MOUNT_PATH="$(_realpath "$path" 2>/dev/null)" || return 1
+  [[ -n "$BWRAP_MOUNT_PATH" ]]
+}
+
+# Append one fail-closed bubblewrap mask at the canonical path. Directories
+# use an empty tmpfs; existing non-directories (regular files, sockets, FIFOs,
+# devices) use an inert file bind so sandbox startup does not fail on the node
+# type. A missing path gets an empty tmpfs on its topmost missing ancestor, so
+# neither it nor the directories leading to it can be created inside the
+# sandbox. For a plain missing path whose parent exists (the only kind the
+# enforceability check lets through) that is the path itself; a dangling link
+# into a removed tree (~/.npmrc -> ~/gone/npmrc) masks ~/gone.
 append_bwrap_block() {
-  local path="$1"
-  if [[ -d "$path" && ! -L "$path" ]]; then
+  local path
+  bwrap_mount_path "$1" || return 0
+  path="$BWRAP_MOUNT_PATH"
+  if [[ -d "$path" ]]; then
     BWRAP_ARGS+=(--tmpfs "$path")
-  elif [[ -e "$path" || -L "$path" ]]; then
+  elif [[ -e "$path" ]]; then
     BWRAP_ARGS+=(--ro-bind /dev/null "$path")
-  elif [[ -d "$(dirname "$path")" ]]; then
-    BWRAP_ARGS+=(--tmpfs "$path")
+  else
+    while [[ "$path" != "/" && ! -e "$(dirname "$path")" ]]; do
+      path="$(dirname "$path")"
+    done
+    [[ "$path" != "/" && -d "$(dirname "$path")" ]] && BWRAP_ARGS+=(--tmpfs "$path")
   fi
+  return 0
+}
+
+# Mask every installed privilege tool at its canonical path. A missing tool or
+# a dangling link names no binary, and bwrap could not create a mount point for
+# it under the read-only /usr bind, so it is skipped. Several names often
+# resolve to one binary (sudo, sudoedit, sudo-rs); each target is masked once.
+append_bwrap_privilege_masks() {
+  local tool target seen=" "
+  for tool in "${LINUX_PRIVILEGE_TOOLS[@]}"; do
+    tool="${_SCODE_PRIVILEGE_ROOT:-}${tool}"
+    [[ -e "$tool" ]] || continue
+    bwrap_mount_path "$tool" || continue
+    target="$BWRAP_MOUNT_PATH"
+    [[ ! -d "$target" ]] || continue
+    case "$seen" in *" ${target} "*) continue ;; esac
+    seen+="${target} "
+    BWRAP_ARGS+=(--ro-bind /dev/null "$target")
+  done
 }
 
 append_bwrap_allow() {
@@ -3523,6 +3615,9 @@ append_bwrap_final_policy() {
     case "$source" in config|project|cli|defense) ;; *) continue ;; esac
     path="${ALL_BLOCKED[$i]}"
     if [[ "$strict_mode" -eq 1 ]]; then
+      # A link resolves inside a bound tree even when its name does not.
+      bwrap_mount_path "$path" || continue
+      path="$BWRAP_MOUNT_PATH"
       under_bound=0
       is_same_or_descendant_path "$path" "$project_dir" && under_bound=1
       if [[ "$under_bound" -eq 0 && ${ALL_ALLOWED[0]+_} ]]; then
@@ -3542,6 +3637,11 @@ append_bwrap_final_policy() {
     for path in "${ALL_ALLOWED[@]}"; do
       [[ -z "$path" ]] && continue
       for bdir in "${ALL_BLOCKED[@]}"; do
+        [[ -z "$bdir" ]] && continue
+        # The block lands on the canonical path; an allowed child of that
+        # target must be rebound after it, whatever name the block used.
+        bwrap_mount_path "$bdir" || continue
+        bdir="$BWRAP_MOUNT_PATH"
         if is_descendant_path "$path" "$bdir"; then
           append_bwrap_allow "$path" "$project_dir" "$fs_mode"
           break
@@ -3601,9 +3701,7 @@ build_bwrap_args() {
   BWRAP_ARGS+=(--bind "$HOME" "$HOME")
 
   # Privilege escalation prevention
-  for priv in /usr/bin/sudo /usr/bin/su /usr/bin/login /usr/bin/doas /usr/bin/pkexec; do
-    [[ -f "$priv" ]] && BWRAP_ARGS+=(--ro-bind /dev/null "$priv")
-  done
+  append_bwrap_privilege_masks
 
   # Block specific directories/files.
   # bwrap applies mounts in order; later mounts override earlier ones.
@@ -3624,9 +3722,15 @@ build_bwrap_args() {
   else
     BWRAP_ARGS+=(--bind "$project_dir" "$project_dir")
   fi
-  # Re-block subdirectories/files within the project (overlays after project bind)
+  # Re-block subdirectories/files within the project (overlays after project
+  # bind). Compare the canonical path: a block outside the project can be a
+  # link into it, and the project bind would otherwise reopen its target.
+  local bpath
   for bdir in "${blocked[@]}"; do
-    if [[ "$bdir" == "$project_dir"/* ]]; then
+    [[ -z "$bdir" ]] && continue
+    bwrap_mount_path "$bdir" || continue
+    bpath="$BWRAP_MOUNT_PATH"
+    if [[ "$bdir" == "$project_dir"/* || "$bpath" == "$project_dir"/* ]]; then
       append_bwrap_block "$bdir"
     fi
   done
@@ -3689,9 +3793,7 @@ build_strict_bwrap_args() {
   # surface. Tools needing it should use --allow /run/user/$UID explicitly.
 
   # Privilege escalation prevention
-  for priv in /usr/bin/sudo /usr/bin/su /usr/bin/login /usr/bin/doas /usr/bin/pkexec; do
-    [[ -f "$priv" ]] && BWRAP_ARGS+=(--ro-bind /dev/null "$priv")
-  done
+  append_bwrap_privilege_masks
 
   # Project directory
   if [[ "$fs_mode" == "ro" ]]; then
@@ -5629,9 +5731,7 @@ elif [[ "$PLATFORM" == "linux" ]]; then
   fi
 
   # Later binds must not reopen the privilege-command masks.
-  for priv in /usr/bin/sudo /usr/bin/su /usr/bin/login /usr/bin/doas /usr/bin/pkexec; do
-    [[ -f "$priv" ]] && BWRAP_ARGS+=(--ro-bind /dev/null "$priv")
-  done
+  append_bwrap_privilege_masks
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     printf 'bwrap'

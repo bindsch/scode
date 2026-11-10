@@ -382,7 +382,134 @@ wait_for_file() {
 @test "linux dry-run: blocks sudo/su/login" {
   run linux_dry_run true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"/usr/bin/sudo"* ]] || [[ "$output" == *"--ro-bind /dev/null /usr/bin/sudo"* ]]
+  # Each installed tool is masked at its canonical path (Ubuntu 26.04 links
+  # /usr/bin/sudo to sudo-rs through /etc/alternatives).
+  local tool found=0
+  for tool in /usr/bin/sudo /usr/bin/su /usr/bin/login; do
+    [[ -e "$tool" ]] || continue
+    found=1
+    [[ "$output" == *"--ro-bind /dev/null $(realpath "$tool")"* ]]
+  done
+  [ "$found" -eq 1 ] || skip "no privilege tool installed on this host"
+}
+
+# A symlinked privilege tool is masked at its resolved target; the link name
+# itself is never a mount destination, because bwrap resolves an absolute link
+# against its staging root and fails ("Can't create file at /usr/bin/sudo").
+# The fixture root keeps the test away from the host's real /usr/bin.
+@test "linux dry-run: symlinked privilege tools are masked at their target" {
+  local root
+  root="$(realpath "$TEST_PROJECT")/privroot"
+  mkdir -p "$root/usr/bin" "$root/usr/lib/cargo/bin" "$root/etc/alternatives"
+  printf '#!/bin/sh\nexit 0\n' > "$root/usr/lib/cargo/bin/sudo"
+  printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/su"
+  ln -s "$root/usr/lib/cargo/bin/sudo" "$root/etc/alternatives/sudo"
+  ln -s "$root/etc/alternatives/sudo" "$root/usr/bin/sudo"
+  ln -s ../lib/cargo/bin/sudo "$root/usr/bin/sudo-rs"
+  ln -s "$root/missing/doas" "$root/usr/bin/doas"
+
+  _SCODE_PRIVILEGE_ROOT="$root" run linux_dry_run true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--ro-bind /dev/null $root/usr/lib/cargo/bin/sudo "* ]]
+  [[ "$output" == *"--ro-bind /dev/null $root/usr/bin/su "* ]]
+  # No mount on a link name, a dangling link, or a missing tool.
+  [[ "$output" != *"/dev/null $root/usr/bin/sudo "* ]]
+  [[ "$output" != *"/dev/null $root/usr/bin/sudo-rs "* ]]
+  [[ "$output" != *"/dev/null $root/etc/alternatives/sudo "* ]]
+  [[ "$output" != *"$root/usr/bin/doas"* ]]
+  [[ "$output" != *"$root/missing/doas"* ]]
+  [[ "$output" != *"$root/usr/bin/pkexec"* ]]
+  # sudo and sudo-rs share one target: one mask per pass (builder + final).
+  local masks
+  masks="$(printf '%s\n' "$output" | grep -o -- "--ro-bind /dev/null $root/usr/lib/cargo/bin/sudo " | wc -l)"
+  [ "$masks" -eq 2 ]
+}
+
+@test "linux: privilege root override is refused outside dry-run" {
+  _SCODE_PRIVILEGE_ROOT="$TEST_PROJECT" run "$SCODE" -C "$TEST_PROJECT" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"privilege root override is only permitted with --dry-run"* ]]
+}
+
+# Default blocks under HOME are not canonicalized when the list is built, so a
+# dotfile manager's absolute links (~/.aws, ~/.netrc, a linked ~/.config) must
+# be masked at their targets; a mount on the link name fails bwrap startup.
+make_symlinked_home_fixture() {
+  local base="$1"
+  mkdir -p "$base/home/dotfiles/aws" "$base/xdg/gh" "$base/proj"
+  echo "aws-secret" > "$base/home/dotfiles/aws/credentials"
+  echo "netrc-secret" > "$base/home/dotfiles/netrc"
+  echo "gh-secret" > "$base/xdg/gh/hosts.yml"
+  ln -s "$base/home/dotfiles/aws" "$base/home/.aws"
+  ln -s "$base/home/dotfiles/netrc" "$base/home/.netrc"
+  ln -s "$base/xdg" "$base/home/.config"
+  ln -s "$base/home/dotfiles/npmrc" "$base/home/.npmrc"
+  # A dotfile manager whose checkout was removed: the target's parent is gone.
+  ln -s "$base/home/gone/yarnrc" "$base/home/.yarnrc"
+}
+
+@test "linux dry-run: symlinked default blocks are masked at their targets" {
+  local base
+  base="$(realpath "$TEST_PROJECT")"
+  make_symlinked_home_fixture "$base"
+  HOME="$base/home" _SCODE_PLATFORM=linux run "$SCODE" --dry-run -C "$base/proj" -- true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--tmpfs $base/home/dotfiles/aws "* ]]
+  [[ "$output" == *"--ro-bind /dev/null $base/home/dotfiles/netrc "* ]]
+  [[ "$output" == *"--tmpfs $base/xdg/gh "* ]]
+  # A dangling link is pre-blocked at its target so it cannot be created.
+  [[ "$output" == *"--tmpfs $base/home/dotfiles/npmrc "* ]]
+  # A link into a missing tree masks the topmost missing directory.
+  [[ "$output" == *"--tmpfs $base/home/gone "* ]]
+  [[ "$output" != *" $base/home/.aws "* ]]
+  [[ "$output" != *" $base/home/.netrc "* ]]
+  [[ "$output" != *" $base/home/.config/gh "* ]]
+  [[ "$output" != *" $base/home/.npmrc "* ]]
+}
+
+@test "linux runtime: symlinked default blocks start and hide both names" {
+  require_linux_bwrap
+  local base
+  base="$(realpath "$TEST_PROJECT")"
+  make_symlinked_home_fixture "$base"
+  HOME="$base/home" run "$SCODE" -C "$base/proj" -- bash -c '
+    for f in "$HOME/.aws/credentials" "$HOME/dotfiles/aws/credentials" \
+             "$HOME/.netrc" "$HOME/dotfiles/netrc" "$HOME/.config/gh/hosts.yml"; do
+      if cat "$f" 2>/dev/null | grep -q secret; then echo "LEAK $f"; fi
+    done
+    echo planted > "$HOME/.yarnrc" 2>/dev/null
+    echo planted > "$HOME/.npmrc" 2>/dev/null
+    echo started'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"started"* ]]
+  [[ "$output" != *"LEAK"* ]]
+  # Writes through the dangling links never reach the host.
+  [[ ! -f "$base/home/gone/yarnrc" ]]
+  [[ ! -f "$base/home/dotfiles/npmrc" ]]
+}
+
+# Runs the host's own privilege tools. On Ubuntu 26.04 /usr/bin/sudo is an
+# absolute alternatives link, which made every sandbox fail to start.
+@test "linux runtime: no privilege tool name reaches its binary" {
+  require_linux_bwrap
+  local tool found=()
+  for tool in /usr/bin/sudo /usr/bin/sudoedit /usr/bin/sudo.ws /usr/bin/sudo-rs \
+              /usr/bin/su /usr/bin/su-rs /usr/lib/cargo/bin/sudo /usr/lib/cargo/bin/su \
+              /usr/bin/login /usr/bin/doas /usr/bin/pkexec; do
+    if [[ -e "$tool" ]]; then found+=("$tool"); fi
+  done
+  [[ ${#found[@]} -gt 0 ]] || skip "no privilege tool installed on this host"
+  run "$SCODE" -C "$TEST_PROJECT" -- bash -c '
+    for t in "$@"; do
+      if [ -s "$t" ]; then echo "READABLE $t"; fi
+      "$t" --help >/dev/null 2>&1; rc=$?
+      [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ] || echo "RAN $t rc=$rc"
+    done
+    echo started' scode-priv-check "${found[@]}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"started"* ]]
+  [[ "$output" != *"READABLE"* ]]
+  [[ "$output" != *"RAN"* ]]
 }
 
 # ---------- Linux: XDG_RUNTIME_DIR ----------
@@ -462,11 +589,17 @@ wait_for_file() {
 # ---------- New default blocks: cross-platform ----------
 
 @test "linux dry-run: blocks cross-platform credential files" {
-  run linux_dry_run true
+  # A fixture HOME with ~/.config: a missing parent leaves its children
+  # unblocked, so the host's own HOME (a fresh container has no ~/.config)
+  # must not decide the result.
+  local home
+  home="$(realpath "$TEST_PROJECT")/home"
+  mkdir -p "$home/.config" "$TEST_PROJECT/proj"
+  HOME="$home" _SCODE_PLATFORM=linux run "$SCODE" --dry-run -C "$TEST_PROJECT/proj" -- true
   [ "$status" -eq 0 ]
-  [[ "$output" == *"$HOME/.pypirc"* ]]
-  [[ "$output" == *"$HOME/.config/gh"* ]]
-  [[ "$output" == *"$HOME/.config/hub"* ]]
+  [[ "$output" == *"$home/.pypirc"* ]]
+  [[ "$output" == *"$home/.config/gh"* ]]
+  [[ "$output" == *"$home/.config/hub"* ]]
 }
 
 # ---------- Linux: project dir under blocked parent ----------

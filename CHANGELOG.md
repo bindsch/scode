@@ -7,6 +7,24 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux sandboxes start on Ubuntu 26.04. There `/usr/bin/sudo` is an absolute
+  link to sudo-rs through `/etc/alternatives`, and the privilege mask
+  `--ro-bind /dev/null /usr/bin/sudo` made bubblewrap fail with "Can't create
+  file at /usr/bin/sudo", so every Linux run failed. Masks and blocks are now
+  mounted on the path with every symbolic link resolved, which bubblewrap
+  accepts and which covers every name that leads to the target. The same fix
+  applies to default blocks that are links or sit under a linked directory
+  (a dotfile manager's `~/.aws` or `~/.config`): they also failed to start
+  before. A missing privilege tool or a dangling link to one is skipped.
+- Linux also masks the classic `sudo.ws` and the sudo-rs names (`sudo-rs`,
+  `su-rs`, `sudoedit`, and the binaries in `/usr/lib/cargo/bin`), so a host with
+  both sudo implementations installed exposes neither.
+- A block whose link resolves into the project, or into a strict-mode grant,
+  is reasserted after the project bind; an allowed child of a linked block is
+  rebound after the block's resolved target.
+
 ## [0.6.3] - 2026-11-09
 
 ### Fixed

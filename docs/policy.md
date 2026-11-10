@@ -93,7 +93,19 @@ Explicit grants and project selection still matter. Custom blocks inside the
 project are reasserted after the project grant.
 
 macOS denies execution of basenames `sudo`, `su`, `login`, `doas`, and
-`pkexec`. Linux masks existing corresponding files in `/usr/bin`.
+`pkexec`. Linux masks the installed files `LINUX_PRIVILEGE_TOOLS` names in
+[scode](../scode): those in `/usr/bin`, the classic `sudo.ws`, and the sudo-rs
+names that Ubuntu 26.04 installs (`sudo-rs`, `su-rs`, and the binaries in
+`/usr/lib/cargo/bin`).
+
+On Linux every mask is mounted on the path with all symbolic links resolved.
+bubblewrap cannot mount on a link: it resolves an absolute link against its
+staging root and refuses to start. A mount on the resolved target covers every
+name that leads to it, such as `/usr/bin/sudo` through `/etc/alternatives/sudo`
+on Ubuntu 26.04, or a dotfile manager's `~/.aws` link. A missing privilege tool
+or a dangling link to one is skipped. A dangling link in a block list is
+blocked at its target path, or at the topmost missing directory above the
+target, so neither the target nor its parents can be created in the sandbox.
 Releases through v0.6.0 could reopen these with later grants; the working tree
 reasserts them after grants. These restrictions do not identify renamed copies
 or every privilege mechanism and do not replace the OS user boundary.
