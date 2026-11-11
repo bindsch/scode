@@ -135,7 +135,11 @@ read-only, including its resolved target and any temporary space-free alias;
 its directory and sibling files remain blocked. macOS also permits ancestor
 metadata so Node can resolve the preload path. Custom blocks remain
 authoritative: a custom block covering the preload disables its injection,
-and one covering the command suppresses the command exception.
+and one covering the command suppresses the command exception. If an
+installation path contains spaces and a retained custom block covers the
+temporary preload alias (for example, `--block /tmp`), scode refuses the
+launch before creating the link or emitting policy. Use an installation
+path without spaces or revise the custom block to launch.
 
 Both platforms use the same emission rule after resolving policy sources:
 grants expose their selected paths, retained blocks restrict those grants,
@@ -194,6 +198,9 @@ carve-outs, and child allows) are followed by a deny for any block spelling
 inside them, so a grant never reopens a block's resolved target. An allow of a
 built-in block's link name or of its resolved target lifts that block on both
 platforms, as an allow of the literal path already did.
+For a custom block, only an allow covering its resolved target lifts the
+block. Allowing an ancestor of its written link name does not lift it when
+the target lies outside that ancestor.
 Releases through v0.6.0 could reopen these with later grants; the working tree
 reasserts them after grants. These restrictions do not identify renamed copies
 or every privilege mechanism and do not replace the OS user boundary.

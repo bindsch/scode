@@ -122,6 +122,26 @@ function check(f, allows, strict, ro, useHome, label, harness = false, customRun
   }
 }
 
+if (selection === 'matrix' || selection === 'custom-links') {
+  const f = fixture(0, 'custom-links');
+  const writtenParent = `${f.home}/written`;
+  const middleParent = `${f.home}/middle`;
+  const target = `${f.home}/custom-target`;
+  fs.mkdirSync(writtenParent);
+  fs.mkdirSync(middleParent);
+  f.queries.push(file(`${target}/private`), file(`${target}/child/source`));
+  const spellings = [`${writtenParent}/link`, `${middleParent}/link`, target];
+  fs.symlinkSync(target, spellings[1]);
+  fs.symlinkSync(spellings[1], spellings[0]);
+  f.blocks.push({ builtin: false, spellings });
+  f.customBlocks.push(spellings[0]);
+  for (const allows of [[writtenParent], [middleParent], [writtenParent, `${target}/child`], [target], [f.home]]) {
+    for (const strict of [false, true]) for (const ro of [false, true]) {
+      check(f, allows, strict, ro, false, `custom-links,allows=${allows.join(',')}`, true);
+    }
+  }
+}
+
 if (selection === 'matrix') {
   for (const hops of [0, 1, 2, 3]) {
     for (const targetKind of ['secret', 'project', 'nested-project']) {
@@ -158,7 +178,7 @@ if (selection === 'matrix') {
       check(f, allows, strict, ro, false, `runtime-grants=${allows.length}`);
     }
   }
-} else {
+} else if (selection !== 'custom-links') {
   const f = fixture(2, 'secret', selection === 'ssh' ? '.ssh' : '.aws');
   for (const strict of [false, true]) for (const ro of [false, true]) {
     check(f, [f.allowed, `${f.target}/${selection === 'ssh' ? 'known_hosts' : 'allowed.txt'}`],

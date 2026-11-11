@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('node:assert/strict');
-const { permits } = require('./policy_model');
+const { permits, permitsLaunch, retainedBlocks } = require('./policy_model');
 const { parseProfile, seatbelt, parseMounts, bubblewrap } = require('./policy_evaluators');
 
 const policy = {
@@ -34,6 +34,24 @@ for (const platform of ['darwin', 'linux']) {
   assert.equal(permits(nested, '/home/.codex/aws/credentials', 'write'), false);
   assert.equal(permits(nested, '/home/.codex/aws/project/source', 'read'), true);
   assert.equal(permits(nested, '/home/.codex/aws/project/source', 'write'), true);
+  const linkedCustom = { ...p, harness: ['/home'], allows: ['/home/written'], blocks: [
+    { builtin: false, spellings: ['/home/written/link', '/home/middle/link', '/home/secret'] },
+  ] };
+  assert.equal(retainedBlocks(linkedCustom).length, 1);
+  assert.equal(permits(linkedCustom, '/home/secret/private', 'read'), false);
+  assert.equal(permits(linkedCustom, '/home/secret/private', 'write'), false);
+  assert.equal(retainedBlocks({ ...linkedCustom, allows: ['/home/middle'] }).length, 1);
+  assert.equal(retainedBlocks({ ...linkedCustom, allows: ['/home/secret'] }).length, 0);
+  assert.equal(retainedBlocks({ ...linkedCustom, allows: ['/home'] }).length, 0);
+  assert.equal(permits({ ...linkedCustom, allows: ['/home/secret/child'] },
+    '/home/secret/child/file', 'write'), true);
+  const aliasPolicy = { ...p, preloadAlias: ['/tmp/alias/preload.js', '/private/tmp/alias/preload.js'],
+    blocks: [{ builtin: false, spellings: ['/home/tmp-link', '/private/tmp'] }] };
+  assert.equal(permitsLaunch(aliasPolicy), false);
+  assert.equal(permitsLaunch({ ...aliasPolicy, allows: ['/home'] }), false);
+  assert.equal(permitsLaunch({ ...aliasPolicy, allows: ['/private/tmp'] }), true);
+  assert.equal(permitsLaunch({ ...aliasPolicy, preloadAlias: ['/elsewhere/preload.js'] }), true);
+  assert.equal(permitsLaunch({ ...aliasPolicy, blocks: [{ builtin: true, spellings: ['/tmp'] }] }), true);
 }
 // Synthetic policies make ordering errors visible without depending on scode.
 const rules = parseProfile('(allow default)(deny file-read* file-write* (subpath "/home/secret"))' +

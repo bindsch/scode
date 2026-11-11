@@ -11,6 +11,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- A temporary preload alias under a retained custom block now refuses launch
+  before creating the link. Space-containing installations can no longer
+  bypass `--block /tmp`. The reference model also distinguishes custom block
+  targets from their written symlink names when applying allows.
 - Selecting a project inside a built-in block now exempts only that project.
   Strict mode keeps sibling credentials blocked when automatic harness state
   exposes the parent, including when the built-in block is a symlink.

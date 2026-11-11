@@ -104,7 +104,12 @@ setup_final_policy_home() {
 # The CLI creates a fresh random directory, so it cannot contain a fixture
 # credential before launch. Load function definitions only, without main.
 render_private_temp_profile() {
-  source <(awk '/^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ { emit=1 } emit { print } /^}/ { emit=0 }' "$SCODE_SOURCE")
+  # Apple Bash 3.2 can source a process-substitution pipe as an empty file.
+  # Capture the real launcher definitions before evaluating them, and propagate
+  # extraction failures. SCODE_SOURCE selects the launcher even under kcov.
+  local definitions
+  definitions="$(awk '/^[a-zA-Z_][a-zA-Z0-9_]*\(\) \{/ { emit=1 } emit { print } /^}/ { emit=0 }' "$SCODE_SOURCE")" || return
+  eval "$definitions" || return
   ALL_BLOCKED=("$FHOME/.gnupg")
   ALL_BLOCKED_SOURCES=(default)
   ALL_BLOCKED_SPELLINGS=("$FHOME/.gnupg"$'\n'"$FHOME/temp/credentials"$'\n')
@@ -115,6 +120,22 @@ render_private_temp_profile() {
   SAFE_DARWIN_TMPDIR="$FHOME/temp"
   SCODE_NO_SANDBOX_JS=""
   generate_strict_profile "$FHOME/project" rw off "${ALL_BLOCKED[@]}"
+}
+
+@test "private temp profile loads real launcher functions under system Bash without a sandbox" {
+  setup_final_policy_home
+  # Invoke the system shell explicitly so Homebrew Bash cannot hide a macOS CI
+  # failure. Reuse the renderer and source path used by the runtime test below.
+  run /bin/bash -c "$(declare -f render_private_temp_profile)"$'\n''
+    FHOME=$1
+    SCODE_SOURCE=$2
+    render_private_temp_profile
+  ' bash "$FHOME" "$SCODE_SOURCE"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(deny default)"* ]]
+  [[ "$output" == *"(subpath \"$FHOME/temp\")"* ]]
+  local tail="${output##*; Built-in blocks inside granted paths}"
+  [[ "$tail" == *"(subpath \"$FHOME/temp/credentials\")"* ]]
 }
 
 @test "macOS runtime: private temp keeps blocked credentials hidden and ordinary temp writable" {

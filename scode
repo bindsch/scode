@@ -6063,6 +6063,21 @@ if [[ -n "${SCODE_LIB_DIR}" && -f "${SCODE_LIB_DIR}/no-sandbox.js" ]]; then
     if SCODE_NO_SANDBOX_TMPDIR="$(mktemp -d "/tmp/scode-no-sandbox.${UID}.XXXXXX")"; then
       chmod 700 "${SCODE_NO_SANDBOX_TMPDIR}"
       SCODE_NO_SANDBOX_LINK="${SCODE_NO_SANDBOX_TMPDIR}/preload.js"
+      # Check the alias location before creating the link: resolving it after
+      # ln would check the preload target again and miss a block on /tmp.
+      _preload_alias_real="$(_realpath "$SCODE_NO_SANDBOX_TMPDIR")/preload.js"
+      for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+        case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in
+          config|project|cli|defense)
+            if path_in_block "$SCODE_NO_SANDBOX_LINK" "$_blocked_i" || \
+               path_in_block "$_preload_alias_real" "$_blocked_i"; then
+              error "custom policy blocks the temporary preload alias: ${SCODE_NO_SANDBOX_LINK}"
+              error "use an installation path without spaces or revise the custom block"
+              exit 1
+            fi
+            ;;
+        esac
+      done
     fi
     if [[ -n "${SCODE_NO_SANDBOX_LINK}" ]] && ln -s "${SCODE_NO_SANDBOX_JS}" "${SCODE_NO_SANDBOX_LINK}"; then
       SCODE_NO_SANDBOX_JS="${SCODE_NO_SANDBOX_LINK}"

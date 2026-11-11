@@ -9,7 +9,16 @@ const child = (path, parent) => path !== parent && under(path, parent);
 
 function retainedBlocks(policy) {
   return policy.blocks.filter(block => !policy.allows.some(allow =>
-    under(block.spellings[0], allow) || under(block.spellings.at(-1), allow)));
+    (block.builtin && under(block.spellings[0], allow)) || under(block.spellings.at(-1), allow)));
+}
+
+// Alias names describe its location before symlink creation, including the
+// canonical parent. A retained custom block refuses launch before emission.
+function permitsLaunch(policy) {
+  return !retainedBlocks(policy).some(block => !block.builtin &&
+    (policy.preloadAlias || []).some(alias =>
+      (policy.platform === 'linux' ? [block.spellings.at(-1)] : block.spellings)
+        .some(root => under(alias, root))));
 }
 
 function permits(policy, query, operation) {
@@ -34,4 +43,4 @@ function permits(policy, query, operation) {
   return (exposed && !blocked) || (operation === 'read' && runtime);
 }
 
-module.exports = { permits, retainedBlocks, under, child };
+module.exports = { permits, permitsLaunch, retainedBlocks, under, child };

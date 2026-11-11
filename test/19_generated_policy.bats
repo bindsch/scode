@@ -37,6 +37,12 @@ load test_helper
   [ "$status" -eq 0 ]
 }
 
+@test "linked custom blocks stay retained under allows covering only written ancestors" {
+  run node "$BATS_TEST_DIRNAME/generated_policy.js" "$SCODE_SOURCE" "$TEST_PROJECT" custom-links
+  echo "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "runtime: linked blocks preserve file exceptions and hide their siblings" {
   if [[ "$(uname -s)" == Linux ]]; then require_linux_bwrap; else require_runtime_sandbox; fi
   local fixture="$TEST_PROJECT/home" mode access builtin

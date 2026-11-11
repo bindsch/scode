@@ -156,3 +156,32 @@ check_runtime_preload() {
     done
   done
 }
+
+@test "custom blocks covering a space-free preload alias refuse launch and clean up" {
+  # Keep the project outside /tmp, including on Linux where mktemp defaults there.
+  track_cleanup "$TEST_PROJECT"
+  TEST_PROJECT="$(mktemp -d /var/tmp/scode-alias-policy.XXXXXX)"
+  setup_runtime_install source 'scode fixture'
+  ln -s /tmp "$RHOME/tmp-link"
+  local platform mode block alias
+  for platform in darwin linux; do
+    for mode in '' --strict; do
+      for block in /tmp "$RHOME/tmp-link"; do
+        run env HOME="$RHOME" _SCODE_PLATFORM="$platform" "$LAUNCHER" --dry-run ${mode:+"$mode"} \
+          -C "$RHOME/work" --block "$block" -- /usr/bin/true
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"custom policy blocks the temporary preload alias:"* ]]
+        [[ "$output" != *"#   NODE_OPTIONS="* ]]
+        alias="$(printf '%s\n' "$output" | sed -n 's@.*temporary preload alias: \(/tmp/[^/]*/preload.js\).*@\1@p')"
+        [[ "$alias" == /tmp/scode-no-sandbox.*/preload.js ]]
+        [ ! -e "${alias%/*}" ]
+      done
+    done
+  done
+  HOME="$RHOME" run "$LAUNCHER" -C "$RHOME/work" --block /tmp -- \
+    /bin/sh -c 'echo child-started; touch "$HOME/work/child-started"'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"custom policy blocks the temporary preload alias:"* ]]
+  [[ "$output" != *child-started* ]]
+  [ ! -e "$RHOME/work/child-started" ]
+}
