@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Shared helpers for scode test suite
 
-SCODE_SOURCE="$BATS_TEST_DIRNAME/../scode"
+# Inspect/copy the launcher itself, even when execution goes through kcov.
+# Preserve alternate launchers used for pre-fix regression comparisons.
+SCODE_SOURCE="${SCODE_COVERAGE_TARGET:-${SCODE_UNDER_TEST:-$BATS_TEST_DIRNAME/../scode}}"
 SCODE="${SCODE_UNDER_TEST:-$SCODE_SOURCE}"
 NO_SANDBOX_JS="$BATS_TEST_DIRNAME/../lib/no-sandbox.js"
 

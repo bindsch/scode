@@ -59,9 +59,9 @@ Path policy has separate rules; it is not a single last-option-wins list:
 | User/project blocks | Retained unless explicitly reopened by a user-config or CLI allow |
 | CLI blocks | Beat overlapping config allows in either ancestor direction; CLI allows can make exceptions |
 | Project `allowed` | Never authorizes access; redundant entries add no authority |
-| Project grant | Reopens a project inside a built-in blocked parent; retained custom blocks covering the entire project cause refusal |
+| Project grant | Reopens a project inside a built-in blocked parent; built-in and custom blocks inside the project stay blocked in both modes; retained custom blocks covering the entire project cause refusal |
 | Internal command/preload grants | Cannot override retained custom blocks; the command exception applies only to default/platform blocks |
-| Automatic harness state | Read-write; skipped under `untrusted`, outside effective HOME after symlink resolution, or when custom-blocked |
+| Automatic harness state | Read-write; skipped under `untrusted`, outside effective HOME after symlink resolution, or when blocked; built-in blocks inside state remain denied |
 | Explicit child allow | Can reopen a child of a blocked parent; allowing a parent also covers descendants |
 | Grok mandatory blocks | Overlapping explicit allows are refused |
 | Final project read-only rule | `--ro` remains effective even with a broader writable grant |
@@ -91,6 +91,79 @@ Mozilla, Chrome, Chromium, Brave, Thunderbird, Signal, Flatpak, and Snap state.
 When effective HOME differs from account home, the latter is blocked as a whole.
 Explicit grants and project selection still matter. Custom blocks inside the
 project are reasserted after the project grant.
+
+Strict mode applies built-in blocks inside every grant. Deny-default already
+hides a built-in block outside the grants, but a grant that covers one used to
+reopen it: through v0.6.5, `scode --strict -C ~` left `~/.ssh` readable
+because it lay inside the project. Now a built-in block with any spelling
+strictly inside the project, an explicit allow, or detected harness state is
+denied again after that grant on macOS and masked after the bind on Linux.
+This includes a block whose link resolves into the grant from outside it,
+including a system read grant or the private per-invocation macOS temp grant.
+
+An explicit allow of the block, its link name, its resolved target, or an
+ancestor lifts it, as in default mode. An explicitly allowed child of a block
+is granted again after the block. Automatic harness state cannot lift a
+built-in block, even when a state symlink points inside it. A project that is
+itself a built-in block, or lies inside one, is granted: selecting the project is an
+explicit choice, as in default mode. A custom block that covers the whole
+project is refused in both modes.
+
+The project exception covers only the project and its descendants, including
+under automatic harness state: with `~/.aws -> ~/.codex/aws`, selecting
+`~/.codex/aws/project` grants that project while `~/.codex/aws/credentials`
+stays blocked despite the broader `~/.codex` state grant. Selecting
+`~/.codex/aws` itself grants that entire project. Blocks strictly inside the
+project still apply. Every later re-denial preserves this exception, including
+when a different spelling of the block lies inside a restored child allow.
+macOS excludes the project from its built-in parent's denial predicate. Linux
+masks built-in parents, restores only the project, then masks blocked children.
+
+On Linux, strict mode also masks custom blocks inside detected harness state
+and system read grants; through v0.6.5 they were masked only inside the project
+or an explicit allow. Read-only project binds follow all
+ancestor grant restorations and precede the final Linux masks, so `--ro`
+cannot reopen a blocked child or be hidden by a writable ancestor in either
+mode. Only child exceptions that cannot cover the project are restored after
+these masks. macOS applies its final project write denial after all restores.
+Missing targets on read-only mounts need no mask: they are absent and cannot
+be created there.
+
+The command executable and scode's injected Node preload have exact-file
+exceptions after built-in blocks on both platforms. The preload is granted
+read-only, including its resolved target and any temporary space-free alias;
+its directory and sibling files remain blocked. macOS also permits ancestor
+metadata so Node can resolve the preload path. Custom blocks remain
+authoritative: a custom block covering the preload disables its injection,
+and one covering the command suppresses the command exception.
+
+Both platforms use the same emission rule after resolving policy sources:
+grants expose their selected paths, retained blocks restrict those grants,
+and authoritative child allows reopen only their selected children. A later
+restoration must preserve every retained block within it and the built-in
+project exception. Final guards apply this same rule; they add no authority.
+On macOS, each block denial excludes its authoritative child allows in its
+predicate. Repeating the denial therefore cannot revoke those exceptions;
+a different retained block still applies its own predicate. This also covers
+chains whose intermediate link lies inside a restored allow and whose target
+contains a separately allowed file.
+The project remains read-only under `--ro`. Exact command and preload
+exceptions follow the blocks, subject to custom policy, and cannot add write
+access. They also cannot revoke writes granted by the project or an explicit
+allow: Linux adds an exact read-only bind only when the preceding mounts hide
+the file. Metadata-only ancestor access on macOS supports path resolution.
+The final privilege-command restriction overrides every execution grant.
+
+The pure reference model in `test/policy_model.js` expresses these decisions
+without inspecting emitted rules. `test/19_generated_policy.bats` compares it
+with full CLI dry-runs on both backends. The generator covers link chains,
+block spellings, child/ancestor/target grants, automatic state, runtime files,
+strict mode, and read-only projects. Separate evaluators apply SBPL rules in
+order and Linux mounts in order, including parent mounts that hide earlier
+child mounts. Queries concern existing synthetic host files, not files created
+inside private tmpfs mounts or macOS metadata-only access.
+The matrix includes projects nested inside resolved built-in targets and
+queries sibling credentials under automatic state grants.
 
 macOS denies execution of basenames `sudo`, `su`, `login`, `doas`, and
 `pkexec`. Linux masks the installed files `LINUX_PRIVILEGE_TOOLS` names in

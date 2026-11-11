@@ -49,7 +49,10 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.5"
+readonly PROGRAM_VERSION="0.6.6"
+readonly DARWIN_STRICT_SYSTEM_PATHS=(/usr /opt /System /Library /private/var/db
+  /private/var/run /private/var/select /private/etc /dev /bin /sbin /etc)
+readonly LINUX_SYSTEM_PATHS=(/usr /opt /lib /lib64 /bin /sbin /etc)
 readonly MAX_CONFIG_FILE_BYTES=1048576
 readonly AUDIT_RECORD_SEPARATOR=$'\x1f'
 readonly DEFAULT_CONFIG_FILE="${ACCOUNT_HOME}/.config/scode/sandbox.yaml"
@@ -3165,31 +3168,58 @@ macos_path_in_block() {
   return 1
 }
 
-# Print the deny rule for block INDEX over all of its spellings.
+# Print the deny rule for block INDEX over all of its spellings. Child
+# exceptions are part of the predicate, so repeating this deny cannot revoke
+# them. A different retained block still applies its own predicate; an allow
+# inside one block does not lift another block reached through a link.
 emit_macos_block_deny() {
-  local spelling
+  local index="$1" project_dir="${2:-}" spelling dir
+  local -a exceptions=()
+  if [[ -n "$project_dir" ]] && macos_block_exempts_project "$index" "$project_dir"; then
+    exceptions+=("$project_dir")
+  fi
+  for dir in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+    [[ -n "$dir" ]] || continue
+    macos_path_in_block "$dir" "$index" strict && exceptions+=("$dir")
+  done
   macos_block_spellings "$1"
   [[ ${MACOS_BLOCK_SPELLINGS[0]+_} ]] || return 0
   echo "(deny file-read* file-write* process-exec"
+  if [[ ${exceptions[0]+_} ]]; then
+    echo "  (require-all"
+    echo "    (require-any"
+  fi
   for spelling in "${MACOS_BLOCK_SPELLINGS[@]}"; do
     printf '  (subpath "%s")\n' "$(sbpl_escape "$spelling")"
   done
+  if [[ ${exceptions[0]+_} ]]; then
+    echo "    )"
+    for dir in "${exceptions[@]}"; do
+      printf '    (require-not (subpath "%s"))\n' "$(sbpl_escape "$dir")"
+    done
+    echo "  )"
+  fi
   echo ")"
 }
 
-# emit_macos_redeny_inside SCOPE GRANT...: deny again every block (SCOPE is
-# "all" or "custom") with a spelling strictly inside one of the GRANTs. The
-# last matching Seatbelt rule wins, so a grant emitted after a block reopens
-# whatever the block named inside it, including a link's resolved target.
+# A built-in parent never revokes the selected project after its grant.
+# Custom parents are refused before emission; they have no project exception.
+macos_block_exempts_project() {
+  case "${ALL_BLOCKED_SOURCES[$1]:-default}" in config|project|cli|defense) return 1 ;; esac
+  macos_path_in_block "$2" "$1"
+}
+
+# emit_macos_redeny_inside PROJECT GRANT...: deny every block with a spelling
+# strictly inside one of the GRANTs. The last matching Seatbelt rule wins, so
+# a grant emitted after a block reopens whatever the block named inside it,
+# including a link's resolved target. Every restoration keeps the project
+# exception, even when another spelling of its built-in parent is in a grant.
 emit_macos_redeny_inside() {
-  local scope="$1" i spelling grant hit
+  local project_dir="$1" i spelling grant hit
   shift
   [[ $# -gt 0 ]] || return 0
   for i in "${!ALL_BLOCKED[@]}"; do
     [[ -n "${ALL_BLOCKED[$i]}" ]] || continue
-    if [[ "$scope" == "custom" ]]; then
-      case "${ALL_BLOCKED_SOURCES[$i]:-}" in config|project|cli|defense) ;; *) continue ;; esac
-    fi
     macos_block_spellings "$i"
     hit=0
     for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
@@ -3201,9 +3231,79 @@ emit_macos_redeny_inside() {
         fi
       done
     done
-    [[ "$hit" -eq 1 ]] && emit_macos_block_deny "$i"
+    [[ "$hit" -eq 1 ]] && emit_macos_block_deny "$i" "$project_dir"
   done
   return 0
+}
+
+# macos_path_in_any_block PATH INDEX...: PATH is strictly inside a spelling
+# of one of the blocks INDEX.
+macos_path_in_any_block() {
+  local path="$1" i
+  shift
+  for i in "$@"; do
+    macos_path_in_block "$path" "$i" strict && return 0
+  done
+  return 1
+}
+
+# emit_macos_strict_builtin_blocks PROJECT: strict mode denies by default, so
+# a built-in block needs a rule only where a grant covers it. The project,
+# an explicit allow, or detected harness state reopens every built-in block
+# with a spelling strictly inside it (`--strict -C ~` would expose ~/.ssh), so
+# those blocks are denied again after the grants. A built-in block that is the
+# project or contains it does not apply to the project, as in default mode.
+# Explicit child allows are granted again. Automatic harness state cannot
+# reopen a built-in block. Project selection retains default-mode precedence.
+emit_macos_strict_builtin_blocks() {
+  local project_dir="$1" i spelling grant dir hit
+  local -a grants=("$project_dir") denied=() restored=()
+  grants+=(${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"})
+  grants+=(${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"})
+  for i in "${!ALL_BLOCKED[@]}"; do
+    [[ -n "${ALL_BLOCKED[$i]}" ]] || continue
+    case "${ALL_BLOCKED_SOURCES[$i]:-default}" in config|project|cli|defense) continue ;; esac
+    macos_block_spellings "$i"
+    hit=0
+    for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
+      for grant in "${grants[@]}"; do
+        [[ -n "$grant" ]] || continue
+        if _path_strictly_under "$spelling" "$grant"; then
+          hit=1
+          break 2
+        fi
+      done
+    done
+    # Internal grants do not lift built-ins, even at an exact grant root.
+    # Include the private temp directory as well as system read grants.
+    if [[ "$hit" -eq 0 ]]; then
+      for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
+        for grant in "${DARWIN_STRICT_SYSTEM_PATHS[@]}" "${SAFE_DARWIN_TMPDIR:-}"; do
+          [[ -n "$grant" ]] || continue
+          if _path_same_or_under "$spelling" "$grant"; then
+            hit=1
+            break 2
+          fi
+        done
+      done
+    fi
+    [[ "$hit" -eq 1 ]] || continue
+    if [[ ! ${denied[0]+_} ]]; then
+      echo ""
+      echo "; Built-in blocks inside granted paths"
+    fi
+    emit_macos_block_deny "$i" "$project_dir"
+    denied+=("$i")
+  done
+  [[ ${denied[0]+_} ]] || return 0
+
+  for dir in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+    [[ -n "$dir" ]] || continue
+    macos_path_in_any_block "$dir" "${denied[@]}" || continue
+    printf '(allow file-read* file-write* process-exec\n  (subpath "%s")\n)\n' "$(sbpl_escape "$dir")"
+    restored+=("$dir")
+  done
+  emit_macos_redeny_inside "$project_dir" ${restored[@]+"${restored[@]}"}
 }
 # SCODE_COVERAGE_EXCLUDE_END
 
@@ -3252,8 +3352,9 @@ emit_macos_final_guards() {
 EOF
       reallowed+=("$dir")
     done
-    # A restored child allow must not reopen a custom block inside it.
-    emit_macos_redeny_inside custom ${reallowed[@]+"${reallowed[@]}"}
+    # A restored child allow must not reopen any block inside it, built-in
+    # or custom: strict mode denies built-in blocks inside grants as well.
+    emit_macos_redeny_inside "$project_dir" ${reallowed[@]+"${reallowed[@]}"}
   fi
 
   if [[ "$fs_mode" == "ro" ]]; then
@@ -3265,6 +3366,32 @@ EOF
   (subpath "${esc_project}")
 )
 EOF
+  fi
+
+  # Custom blocks suppress injection before profile generation. Restore only
+  # the active preload after every built-in denial, never its directory.
+  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -f "$SCODE_NO_SANDBOX_JS" ]]; then
+    local preload real_preload ancestor link_preload
+    local -a preload_paths=("$SCODE_NO_SANDBOX_JS")
+    real_preload="$(_realpath "$SCODE_NO_SANDBOX_JS")"
+    [[ "$real_preload" != "$SCODE_NO_SANDBOX_JS" ]] && preload_paths+=("$real_preload")
+    # Seatbelt also checks readlink at the canonical parent (/private/tmp
+    # on macOS), before Node reaches the target of a space-free alias.
+    link_preload="$(expand_output_path "$SCODE_NO_SANDBOX_JS")"
+    if [[ "$link_preload" != "$real_preload" && "$link_preload" != "$SCODE_NO_SANDBOX_JS" ]]; then
+      preload_paths+=("$link_preload")
+    fi
+    for preload in "${preload_paths[@]}"; do
+      printf '\n; scode Node.js preload (read-only)\n(allow file-read*\n  (literal "%s")\n)\n' \
+        "$(sbpl_escape "$preload")"
+      # Node canonicalizes the require path. Permit stat of its ancestors,
+      # without permitting directory listings or reads of sibling files.
+      ancestor="$(dirname "$preload")"
+      while [[ "$ancestor" != / ]]; do
+        printf '(allow file-read-metadata (literal "%s"))\n' "$(sbpl_escape "$ancestor")"
+        ancestor="$(dirname "$ancestor")"
+      done
+    done
   fi
 }
 # SCODE_COVERAGE_EXCLUDE_END
@@ -3370,7 +3497,7 @@ EOF
           grants+=("$dir")
         fi
       done
-      emit_macos_redeny_inside all ${grants[@]+"${grants[@]}"}
+      emit_macos_redeny_inside "$project_dir" ${grants[@]+"${grants[@]}"}
     fi
   fi
 
@@ -3409,7 +3536,7 @@ EOF
       fi
       # Re-deny blocks inside the project (later rules win), including a
       # block whose link resolves into the project.
-      emit_macos_redeny_inside all "$project_dir"
+      emit_macos_redeny_inside "$project_dir" "$project_dir"
     fi
   fi
 
@@ -3447,7 +3574,7 @@ EOF
       fi
     done
     # A child allow must not reopen another block named inside it.
-    emit_macos_redeny_inside all ${grants[@]+"${grants[@]}"}
+    emit_macos_redeny_inside "$project_dir" ${grants[@]+"${grants[@]}"}
   fi
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
@@ -3530,18 +3657,12 @@ generate_strict_profile() {
 
 ; System essentials (read-only)
 (allow file-read*
-  (subpath "/usr")
-  (subpath "/opt")
-  (subpath "/System")
-  (subpath "/Library")
-  (subpath "/private/var/db")
-  (subpath "/private/var/run")
-  (subpath "/private/var/select")
-  (subpath "/private/etc")
-  (subpath "/dev")
-  (subpath "/bin")
-  (subpath "/sbin")
-  (subpath "/etc")
+EOF
+  local sysdir
+  for sysdir in "${DARWIN_STRICT_SYSTEM_PATHS[@]}"; do
+    printf '  (subpath "%s")\n' "$sysdir"
+  done
+  cat <<EOF
 )
 
 ; Allow process execution
@@ -3601,20 +3722,6 @@ EOF
 
 ; Network access
 (allow network*)
-EOF
-  fi
-
-  # Allow only the exact preload file; exposing the containing directory would
-  # reopen sibling files hidden by a custom block.
-  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -f "${SCODE_NO_SANDBOX_JS}" ]]; then
-    local esc_preload
-    esc_preload="$(sbpl_escape "$SCODE_NO_SANDBOX_JS")"
-    cat <<EOF
-
-; scode Node.js preload (read-only)
-(allow file-read*
-  (literal "${esc_preload}")
-)
 EOF
   fi
 
@@ -3678,6 +3785,8 @@ EOF
       fi
     done
   fi
+
+  emit_macos_strict_builtin_blocks "$project_dir"
 
   emit_macos_final_guards "$project_dir" "$fs_mode"
 
@@ -3783,47 +3892,169 @@ append_bwrap_allow() {
   fi
 }
 
+# Add an exact read grant only when the current mounts hide the host file.
+# An exception adds access; it must not cap an existing writable grant. Scan
+# the emitted mounts in order because a later parent mount hides child mounts.
+append_bwrap_read_exception() {
+  local path="$1" i flag source target visible=0
+  local count=${#BWRAP_ARGS[@]}
+  for ((i=0; i<count; i++)); do
+    flag="${BWRAP_ARGS[$i]}"
+    case "$flag" in
+      --bind|--ro-bind|--dev-bind)
+        i=$((i + 1)); source="${BWRAP_ARGS[$i]}"
+        i=$((i + 1)); target="${BWRAP_ARGS[$i]}"
+        if _path_same_or_under "$path" "$target"; then
+          visible=0
+          [[ "$source" == "$target" ]] && visible=1
+        fi
+        ;;
+      --tmpfs|--proc|--dev)
+        i=$((i + 1)); target="${BWRAP_ARGS[$i]}"
+        _path_same_or_under "$path" "$target" && visible=0
+        ;;
+    esac
+  done
+  if [[ "$visible" -eq 0 ]]; then
+    BWRAP_ARGS+=(--ro-bind "$path" "$path")
+  fi
+}
+
+# strict_block_in_bound_tree PATH PROJECT BUILTIN: canonical block PATH lies
+# inside a tree strict mode binds (the project, an explicit allow, or
+# detected harness state). A custom block counts when it is the tree itself;
+# a built-in block only when strictly inside, so a built-in block that is the
+# project, or one that a grant names exactly, does not apply to that grant,
+# as in default mode. Callers pass the path bwrap_mount_path resolved.
+strict_block_in_bound_tree() {
+  local path="$1" project_dir="$2" builtin="$3" tree
+  # An exact project root has no siblings inside this block. A blocked
+  # parent still needs a mask when another grant exposes those siblings.
+  if [[ "$builtin" -eq 1 && "$project_dir" == "$path" ]]; then
+    return 1
+  fi
+  for tree in "$project_dir" ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"} \
+      ${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"}; do
+    [[ -n "$tree" ]] || continue
+    if [[ "$builtin" -eq 1 ]]; then
+      is_descendant_path "$path" "$tree" && return 0
+    else
+      is_same_or_descendant_path "$path" "$tree" && return 0
+    fi
+  done
+  # Missing targets outside writable grants are already inaccessible on
+  # these read-only mounts; bwrap cannot create mask mount points there.
+  if [[ -e "$path" ]]; then
+    for tree in "${LINUX_SYSTEM_PATHS[@]}"; do
+      [[ -d "$tree" ]] || continue
+      is_same_or_descendant_path "$path" "$tree" && return 0
+    done
+  fi
+  return 1
+}
+
 # Reassert authoritative custom blocks after project/internal mounts, then add
-# only explicit child exceptions. A final project bind preserves --ro even when
-# an allowed ancestor was mounted read-write.
+# only explicit child exceptions. Ancestor grants are already bound by the
+# builders. Bind a read-only project after those grants and before its masks;
+# no later restoration may cover the project and hide its read-only bind.
 append_bwrap_final_policy() {
   local project_dir="$1"
   local fs_mode="$2"
   local strict_mode="$3"
-  local i source path bdir under_bound
+  local i source path bdir builtin
+  local -a masked=()
+
+  # Mask built-in parents before restoring only the project. Skipping the
+  # whole parent would expose siblings through a broader state/system grant.
+  # Descendant masks follow the restoration, independent of block order.
+  local restore_project=0
+  if [[ "$strict_mode" -eq 1 ]]; then
+    for i in "${!ALL_BLOCKED[@]}"; do
+      case "${ALL_BLOCKED_SOURCES[$i]}" in config|project|cli|defense) continue ;; esac
+      bwrap_mount_path "${ALL_BLOCKED[$i]}" || continue
+      path="$BWRAP_MOUNT_PATH"
+      is_descendant_path "$project_dir" "$path" || continue
+      strict_block_in_bound_tree "$path" "$project_dir" 1 || continue
+      append_bwrap_block "$path"
+      masked+=("$path")
+      restore_project=1
+    done
+  fi
+  if [[ "$restore_project" -eq 1 ]]; then
+    # A child allow containing the project was also hidden by the parent
+    # mask. Restore it before the project cap and all descendant masks.
+    for path in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+      is_same_or_descendant_path "$project_dir" "$path" || continue
+      for bdir in "${masked[@]}"; do
+        if is_descendant_path "$path" "$bdir"; then
+          append_bwrap_allow "$path" "$project_dir" "$fs_mode"
+          break
+        fi
+      done
+    done
+  fi
+  if [[ "$fs_mode" == "ro" ]]; then
+    BWRAP_ARGS+=(--ro-bind "$project_dir" "$project_dir")
+  elif [[ "$restore_project" -eq 1 ]]; then
+    BWRAP_ARGS+=(--bind "$project_dir" "$project_dir")
+  fi
 
   for i in "${!ALL_BLOCKED[@]}"; do
     source="${ALL_BLOCKED_SOURCES[$i]}"
-    case "$source" in config|project|cli|defense) ;; *) continue ;; esac
+    builtin=1
+    case "$source" in config|project|cli|defense) builtin=0 ;; esac
     path="${ALL_BLOCKED[$i]}"
     if [[ "$strict_mode" -eq 1 ]]; then
-      # A link resolves inside a bound tree even when its name does not.
+      # Strict mode mounts nothing of HOME by default, so a block needs a
+      # mask only inside a bound tree: the project, an explicit allow, or
+      # detected harness state. A link resolves inside a bound tree even
+      # when its name does not.
       bwrap_mount_path "$path" || continue
       path="$BWRAP_MOUNT_PATH"
-      under_bound=0
-      is_same_or_descendant_path "$path" "$project_dir" && under_bound=1
-      if [[ "$under_bound" -eq 0 && ${ALL_ALLOWED[0]+_} ]]; then
-        for bdir in "${ALL_ALLOWED[@]}"; do
-          if is_same_or_descendant_path "$path" "$bdir"; then
-            under_bound=1
-            break
-          fi
-        done
+      # Built-in parents were masked before the project restoration above.
+      if [[ "$builtin" -eq 1 ]] && is_same_or_descendant_path "$project_dir" "$path"; then
+        continue
       fi
-      [[ "$under_bound" -eq 0 ]] && continue
+      strict_block_in_bound_tree "$path" "$project_dir" "$builtin" || continue
+    elif [[ "$builtin" -eq 1 ]]; then
+      # Default mode already masked built-ins, except that the read-only
+      # project bind above can expose those inside the project again.
+      [[ "$fs_mode" == "ro" ]] || continue
+      bwrap_mount_path "$path" || continue
+      is_descendant_path "$BWRAP_MOUNT_PATH" "$project_dir" || continue
+    fi
+    # A missing target inside a read-only project is already inaccessible
+    # and cannot be created. bwrap cannot create its mask's mount point on
+    # that read-only bind either. Compare the target, including dangling links.
+    if [[ "$fs_mode" == "ro" ]] && bwrap_mount_path "$path" && \
+       [[ ! -e "$BWRAP_MOUNT_PATH" ]] && \
+       is_descendant_path "$BWRAP_MOUNT_PATH" "$project_dir"; then
+      continue
     fi
     append_bwrap_block "$path"
+    bwrap_mount_path "$path" && masked+=("$BWRAP_MOUNT_PATH")
   done
 
-  if [[ ${ALL_ALLOWED[0]+_} && ${ALL_BLOCKED[0]+_} ]]; then
-    for path in "${ALL_ALLOWED[@]}"; do
+  # The block lands on the canonical path; an allowed child of that target
+  # must be bound again after it, whatever name the block used. Default mode
+  # binds again children of every block, since
+  # its built-in masks precede the project bind.
+  if [[ "$strict_mode" -eq 0 ]]; then
+    masked=()
+    for bdir in ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"}; do
+      [[ -z "$bdir" ]] && continue
+      bwrap_mount_path "$bdir" && masked+=("$BWRAP_MOUNT_PATH")
+    done
+  fi
+  if [[ ${masked[0]+_} ]]; then
+    for path in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
       [[ -z "$path" ]] && continue
-      for bdir in "${ALL_BLOCKED[@]}"; do
-        [[ -z "$bdir" ]] && continue
-        # The block lands on the canonical path; an allowed child of that
-        # target must be rebound after it, whatever name the block used.
-        bwrap_mount_path "$bdir" || continue
-        bdir="$BWRAP_MOUNT_PATH"
+      # Builders already restored project ancestors before this function.
+      # Built-in parent masks already precede the project restoration and
+      # custom blocks covering it are refused. Rebinding an ancestor would
+      # hide both the read-only project bind and its descendant masks.
+      is_same_or_descendant_path "$project_dir" "$path" && continue
+      for bdir in "${masked[@]}"; do
         if is_descendant_path "$path" "$bdir"; then
           append_bwrap_allow "$path" "$project_dir" "$fs_mode"
           break
@@ -3832,8 +4063,15 @@ append_bwrap_final_policy() {
     done
   fi
 
-  if [[ "$fs_mode" == "ro" ]]; then
-    BWRAP_ARGS+=(--ro-bind "$project_dir" "$project_dir")
+  # Injection is already disabled for custom blocks. Keep this exact file
+  # after all built-in masks and grants, including the final read-only project.
+  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -f "$SCODE_NO_SANDBOX_JS" ]]; then
+    local real_preload
+    real_preload="$(_realpath "$SCODE_NO_SANDBOX_JS")"
+    if [[ "$real_preload" != "$SCODE_NO_SANDBOX_JS" ]]; then
+      append_bwrap_read_exception "$real_preload"
+    fi
+    append_bwrap_read_exception "$SCODE_NO_SANDBOX_JS"
   fi
 }
 
@@ -3855,7 +4093,7 @@ build_bwrap_args() {
   BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
 
   # System essentials (read-only)
-  for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
+  for sysdir in "${LINUX_SYSTEM_PATHS[@]}"; do
     if [[ -d "$sysdir" ]]; then
       BWRAP_ARGS+=(--ro-bind "$sysdir" "$sysdir")
     fi
@@ -3912,16 +4150,12 @@ build_bwrap_args() {
     [[ -z "$bdir" ]] && continue
     bwrap_mount_path "$bdir" || continue
     bpath="$BWRAP_MOUNT_PATH"
-    if [[ "$bdir" == "$project_dir"/* || "$bpath" == "$project_dir"/* ]]; then
+    # Only the mask target matters. A link name inside the project may
+    # resolve to the project itself or its parent, which remains exempt.
+    if is_descendant_path "$bpath" "$project_dir"; then
       append_bwrap_block "$bdir"
     fi
   done
-
-  # Bind only the exact preload file. Final custom-policy masks are applied
-  # afterward, so an explicit block can never be reopened internally.
-  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -e "${SCODE_NO_SANDBOX_JS}" ]]; then
-    BWRAP_ARGS+=(--ro-bind "$SCODE_NO_SANDBOX_JS" "$SCODE_NO_SANDBOX_JS")
-  fi
 
   # Explicit grants can introduce host paths absent from the initial mounts.
   # Final policy below reasserts retained custom blocks and project read-only.
@@ -3958,7 +4192,7 @@ build_strict_bwrap_args() {
   BWRAP_ARGS+=(--new-session --die-with-parent --unshare-user --unshare-ipc --unshare-pid)
 
   # System essentials only (read-only)
-  for sysdir in /usr /opt /lib /lib64 /bin /sbin /etc; do
+  for sysdir in "${LINUX_SYSTEM_PATHS[@]}"; do
     if [[ -d "$sysdir" ]]; then
       BWRAP_ARGS+=(--ro-bind "$sysdir" "$sysdir")
     fi
@@ -3982,11 +4216,6 @@ build_strict_bwrap_args() {
     BWRAP_ARGS+=(--ro-bind "$project_dir" "$project_dir")
   else
     BWRAP_ARGS+=(--bind "$project_dir" "$project_dir")
-  fi
-
-  # Bind only the exact preload file.
-  if [[ -n "${SCODE_NO_SANDBOX_JS:-}" && -e "${SCODE_NO_SANDBOX_JS}" ]]; then
-    BWRAP_ARGS+=(--ro-bind "$SCODE_NO_SANDBOX_JS" "$SCODE_NO_SANDBOX_JS")
   fi
 
   # Allowed dirs/files (explicit overrides)
@@ -5624,6 +5853,30 @@ path_in_block() {
   fi
 }
 
+# Automatic state is not an explicit allow. Drop a state grant covered by a
+# retained built-in block, including its resolved target. Blocks inside a
+# broader state grant remain in the list and are enforced by the builders.
+if [[ "$STRICT" -eq 1 && ${HARNESS_STRICT_RO[0]+_} ]]; then
+  _unblocked_state=()
+  for dir in "${HARNESS_STRICT_RO[@]}"; do
+    _state_blocked=0
+    for _blocked_i in "${!ALL_BLOCKED[@]}"; do
+      case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in config|project|cli|defense) continue ;; esac
+      if [[ "$PLATFORM" == "darwin" ]]; then
+        path_in_block "$dir" "$_blocked_i" || continue
+      else
+        bwrap_mount_path "${ALL_BLOCKED[$_blocked_i]}" || continue
+        is_same_or_descendant_path "$dir" "$BWRAP_MOUNT_PATH" || continue
+      fi
+      _state_blocked=1
+      warning "strict: built-in block prevents automatic state grant: ${dir}"
+      break
+    done
+    [[ "$_state_blocked" -eq 0 ]] && _unblocked_state+=("$dir")
+  done
+  HARNESS_STRICT_RO=(${_unblocked_state[@]+"${_unblocked_state[@]}"})
+fi
+
 # The project bind is an implicit allow needed to execute the requested task.
 # An authoritative block covering it cannot be implemented without silently
 # weakening either the block or the cwd contract, so fail closed.
@@ -5655,16 +5908,12 @@ if [[ "$PLATFORM" == "linux" ]]; then
     _needs_mount=1
     if [[ "$STRICT" -eq 1 && "$_block_source" != "config" && \
           "$_block_source" != "project" && "$_block_source" != "cli" ]]; then
+      # Strict mode masks a built-in block only inside a bound tree, at its
+      # canonical path (append_bwrap_final_policy).
       _needs_mount=0
-      if is_same_or_descendant_path "$dir" "$PROJECT_DIR"; then
+      if bwrap_mount_path "$dir" && \
+         strict_block_in_bound_tree "$BWRAP_MOUNT_PATH" "$PROJECT_DIR" 1; then
         _needs_mount=1
-      elif [[ ${ALL_ALLOWED[0]+_} ]]; then
-        for _allowed_dir in "${ALL_ALLOWED[@]}"; do
-          if is_same_or_descendant_path "$dir" "$_allowed_dir"; then
-            _needs_mount=1
-            break
-          fi
-        done
       fi
     fi
     if [[ "$_needs_mount" -eq 1 && ! -e "$dir" && ! -d "$(dirname "$dir")" ]]; then
@@ -5805,6 +6054,7 @@ if [[ -n "${SCODE_LIB_DIR}" && -f "${SCODE_LIB_DIR}/no-sandbox.js" ]]; then
     SCODE_NO_SANDBOX_JS=""
   fi
   if [[ -n "$SCODE_NO_SANDBOX_JS" ]]; then
+  SCODE_NO_SANDBOX_JS="$_preload_real"
   # NODE_OPTIONS splits on whitespace — spaces in the path break --require.
   # Work around by symlinking to a space-free path when needed.
   if [[ "${SCODE_NO_SANDBOX_JS}" == *" "* ]]; then
@@ -5983,13 +6233,14 @@ elif [[ "$PLATFORM" == "linux" ]]; then
   # Every retained custom-policy source suppresses this exception.
   if [[ -n "${COMMAND_BINARY_PATH}" && "$_command_has_custom_block" -eq 0 ]]; then
     if [[ "$STRICT" -eq 1 ]]; then
-      BWRAP_ARGS+=(--ro-bind "${COMMAND_BINARY_PATH}" "${COMMAND_BINARY_PATH}")
+      append_bwrap_read_exception "${COMMAND_BINARY_PATH}"
     else
     for _blocked_i in "${!ALL_BLOCKED[@]}"; do
       case "${ALL_BLOCKED_SOURCES[$_blocked_i]}" in default|platform) ;; *) continue ;; esac
       _bdir="${ALL_BLOCKED[$_blocked_i]}"
-      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "$_bdir"; then
-        BWRAP_ARGS+=(--ro-bind "${COMMAND_BINARY_PATH}" "${COMMAND_BINARY_PATH}")
+      bwrap_mount_path "$_bdir" || continue
+      if is_same_or_descendant_path "${COMMAND_BINARY_PATH}" "$BWRAP_MOUNT_PATH"; then
+        append_bwrap_read_exception "${COMMAND_BINARY_PATH}"
         break
       fi
     done

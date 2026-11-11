@@ -150,8 +150,9 @@ wait_for_file() {
   [[ "$output" == *"${child_marker}"* ]]
   local after_block="${output##*--tmpfs ${real_project}/strict-secret}"
   [[ "$after_block" == *"${child_marker}"* ]]
-  local after_child="${output##*${child_marker}}"
-  [[ "$after_child" == *"--ro-bind ${real_project} ${real_project}"* ]]
+  # Rebinding the parent last would hide the mask and expose its siblings.
+  local after_project="${output##*--ro-bind ${real_project} ${real_project}}"
+  [[ "$after_project" == *"--tmpfs ${real_project}/strict-secret"* ]]
 }
 
 @test "linux dry-run: warns when --allow child under blocked parent is missing" {

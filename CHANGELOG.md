@@ -7,6 +7,51 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-11-10
+
+### Fixed
+
+- Selecting a project inside a built-in block now exempts only that project.
+  Strict mode keeps sibling credentials blocked when automatic harness state
+  exposes the parent, including when the built-in block is a symlink.
+- Strict mode now applies built-in blocks inside granted paths on macOS and
+  Linux. It emitted no rule for them, so a grant that covered one reopened it:
+  `scode --strict -C ~` left `~/.ssh` and `~/.config/gh` readable, and
+  `~/Library` on macOS. A built-in block with any spelling inside the project, an
+  explicit allow, or detected harness state, including a link that resolves
+  into the grant or a system read grant, is now denied after the grant on
+  macOS and masked after the bind on Linux. An explicit allow still lifts a
+  block, an allowed child of a block is granted again after it, and a project
+  that is itself a built-in block is granted as in default mode.
+- Linux strict mode masks custom blocks inside detected harness state. They
+  were masked only inside the project or an explicit allow, so
+  `--block ~/.codex/private` stayed readable under `scode --strict codex`.
+- On macOS a child allow that the final guards restore can no longer reopen a
+  built-in block inside it. Every re-denial preserves the project exception,
+  including when an intermediate symlink lies inside that child allow.
+- macOS block predicates preserve explicit child exceptions at every emission,
+  including a separately allowed target file reached through an intermediate
+  link inside a restored allow. Repeated denials cannot revoke that exception.
+- Linux command and preload read exceptions no longer revoke an existing
+  writable grant. Exact read-only binds are added only when earlier mounts
+  hide the file. A generated reference-model suite checks both backends.
+- macOS strict mode applies built-in blocks within its private temp grant.
+- Linux project restoration checks only canonical mask targets, so a built-in
+  link inside the project cannot remask the project itself or its parent.
+- Linux strict mode also enforces custom blocks inside system read grants.
+- Automatic harness state grants no longer reopen built-in blocked parents,
+  including through symlinks. Explicit allows and project selection keep
+  their existing precedence.
+- Linux read-only project binds now follow ancestor grant restorations and
+  precede the final masks. Previously the last project bind reopened blocked
+  children in both modes. Restoring an allowed ancestor cannot override `--ro`.
+- Exact read-only Node preload exceptions now follow built-in blocks on both
+  platforms, including linked and space-containing installation paths. Node
+  can start when scode is installed under a blocked directory without exposing
+  sibling files. Custom preload blocks still disable injection.
+- Linux command exceptions now compare resolved built-in block targets, so a
+  linked blocked directory does not hide the exact command executable.
+
 ## [0.6.5] - 2026-11-10
 
 ### Fixed
