@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.7] - 2026-11-14
+
 ### Added
 
 - Repeatable `--allow-ro PATH` and user-config `allowed_ro:` grants reopen
@@ -25,7 +27,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   the command status. Startup probes verify identity and signaling support;
   unavailable support warns that descendants may survive. macOS 27.2 runtime
   tests cover double fork, setsid, TERM resistance, logging, interruption, and
-  concurrent runs. This remains bounded cleanup, not a kernel lifetime boundary.
+  concurrent runs. The sweep runs with INT, TERM, HUP, and QUIT ignored, so a
+  second interrupt at exit cannot abort it. This remains bounded cleanup, not a
+  kernel lifetime boundary.
 
 ## [0.6.6] - 2026-11-10
 

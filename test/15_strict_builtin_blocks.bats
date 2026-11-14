@@ -32,7 +32,8 @@ setup_strict_home() {
 strict_dry_run() {
   local platform="$1" project="$2"
   shift 2
-  run env HOME="$SHOME" _SCODE_PLATFORM="$platform" \
+  # The caller's SSH agent socket adds its own block; keep fixtures hermetic.
+  run env -u SSH_AUTH_SOCK HOME="$SHOME" _SCODE_PLATFORM="$platform" \
     "$SCODE" --dry-run --strict -C "$project" "$@"
 }
 

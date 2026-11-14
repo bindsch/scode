@@ -76,3 +76,11 @@ check_teardown() {
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '# skip signal delivery is not faithful under kcov')" -eq 3 ]
 }
+
+@test "strict teardown: the exit sweep runs with group signals ignored" {
+  # A follow-up INT/TERM/HUP/QUIT to the process group during the exit trap
+  # must not kill the helper mid-sweep (review 45578a28): the helper runs in
+  # a subshell that ignores them, and ignored dispositions survive exec.
+  run grep -F "(trap '' INT TERM HUP QUIT; exec /usr/bin/python3 -I \"\$SCODE_TEARDOWN_DIR/helper.py\" cleanup" "$SCODE_SOURCE"
+  [ "$status" -eq 0 ]
+}
