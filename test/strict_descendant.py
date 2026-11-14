@@ -71,7 +71,10 @@ def check(scode, project, mode):
     def launch(name, hold=False, logged=False):
         pidfile = project / (name + '.pid')
         args = [scode, '--strict', '--no-net', '-C', str(project),
-                '--allow-ro', str(Path(__file__).resolve())]
+                '--allow-ro', str(Path(__file__).resolve()),
+                # The interpreter's own framework: CI's /usr/bin/python3 is
+                # Xcode's, outside strict's system grants.
+                '--allow-ro', os.path.realpath(sys.base_prefix)]
         if logged:
             args += ['--log', str(project / (name + '.log'))]
         args += ['--', sys.executable, '-I', str(Path(__file__).resolve()),

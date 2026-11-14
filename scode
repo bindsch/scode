@@ -4341,7 +4341,7 @@ SCODE_TEARDOWN_READY=0
 
 # Run outside Seatbelt, before removing its protected marker files. The helper
 # refuses unverified identities and uses PID generations for every signal.
-# shellcheck disable=SC2329 # Called through the EXIT trap.
+# shellcheck disable=SC2329,SC2317 # Called through the EXIT trap. (SC2317 under shellcheck 0.9)
 teardown_strict_descendants() {
   if [[ "$SCODE_TEARDOWN_READY" -eq 1 ]]; then
     # A follow-up group signal must not kill the sweep mid-cleanup: ignored
@@ -4351,7 +4351,7 @@ teardown_strict_descendants() {
   fi
 }
 
-# shellcheck disable=SC2329 # Called by the EXIT trap.
+# shellcheck disable=SC2329,SC2317 # Called by the EXIT trap. (SC2317 under shellcheck 0.9)
 cleanup_strict_identity() {
   teardown_strict_descendants
   if [[ -n "$SCODE_TEARDOWN_DIR" ]]; then
