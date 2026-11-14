@@ -73,10 +73,14 @@ instead of `make install`; it installs the same artifacts:
 ```sh
 (
   set -eu
-  git diff --exit-code HEAD -- scode lib/no-sandbox.js LICENSE examples
+  git diff --exit-code HEAD -- scode lib/no-sandbox.js lib/strict-teardown.py LICENSE examples
   install -d "$HOME/.local/bin" "$HOME/.local/lib/scode" "$HOME/.local/share/scode/examples"
   install -m 755 scode "$HOME/.local/bin/scode"
   install -m 644 lib/no-sandbox.js "$HOME/.local/lib/scode/no-sandbox.js"
+  # Releases with macOS strict teardown also ship this helper.
+  if test -f lib/strict-teardown.py; then
+    install -m 644 lib/strict-teardown.py "$HOME/.local/lib/scode/strict-teardown.py"
+  fi
   install -m 644 LICENSE "$HOME/.local/share/scode/LICENSE"
   install -m 644 examples/sandbox.yaml examples/sandbox-strict.yaml \
     examples/sandbox-paranoid.yaml examples/sandbox-permissive.yaml \

@@ -58,8 +58,8 @@ Path policy has separate rules; it is not a single last-option-wins list:
 | Built-in/platform blocks | Removed when covered by an explicit CLI or user-config allow |
 | User/project blocks | Retained unless explicitly reopened by a user-config or CLI allow |
 | CLI blocks | Beat overlapping config allows in either ancestor direction; CLI allows can make exceptions |
-| Project `allowed` | Never authorizes access; redundant entries add no authority |
-| Project grant | Reopens a project inside a built-in blocked parent; built-in and custom blocks inside the project stay blocked in both modes; retained custom blocks covering the entire project cause refusal |
+| Project `allowed` / `allowed_ro` | Never authorizes access; redundant entries add no authority |
+| Project grant | Reopens a project inside a built-in blocked parent; built-in and custom blocks inside the project stay blocked in both modes; a custom block covering the project requires an authoritative read or read-write grant |
 | Internal command/preload grants | Cannot override retained custom blocks; the command exception applies only to default/platform blocks |
 | Automatic harness state | Read-write; skipped under `untrusted`, outside effective HOME after symlink resolution, or when blocked; built-in blocks inside state remain denied |
 | Explicit child allow | Can reopen a child of a blocked parent; allowing a parent also covers descendants |
@@ -67,9 +67,27 @@ Path policy has separate rules; it is not a single last-option-wins list:
 | Final project read-only rule | `--ro` remains effective even with a broader writable grant |
 | Privilege-command restriction | Reasserted after all grants in this working tree; see below |
 
-Order among `--allow` and `--block` flags does not determine precedence.
-A path grant permits read and write; there is no arbitrary read-only allow flag.
-Use the narrowest subtree required.
+Order among `--allow`, `--allow-ro`, and `--block` flags does not determine
+precedence. `--allow` grants reads and writes. Repeatable `--allow-ro PATH`
+grants reads and execution while capping writes at read-only, including when
+the project or another writable grant overlaps it. On macOS it emits
+`file-read*` and `process-exec` grants followed by a `file-write*` denial;
+Linux uses `bwrap --ro-bind`. The final privilege execution restriction still
+applies. Use the narrowest subtree required.
+
+Read-only grants work in strict mode and can reopen a CLI block, a built-in
+block, or the account-home block created by a synthetic HOME. They do not
+remove write denials. User config `allowed_ro:` has the same read authority,
+except that an overlapping CLI block wins in either ancestor direction.
+Project `allowed_ro:` entries are ignored. Paths resolve against the selected
+project, follow symbolic links, and undergo the same validation as `--allow`.
+Missing read-only paths are refused on both backends, including in dry-run;
+create them before granting access. Dry-run shows the resolved grants.
+Blocks nested inside a read-only grant remain blocked. An explicit grant at
+or below a block can reopen that path, but does not lift deeper blocks.
+
+For example, `--strict --block /store --allow-ro /store/bin/tool` can execute
+that tool without allowing it to change itself or read siblings in `/store`.
 
 On Linux, paths must exist to be bound. In releases through v0.6.0, default-mode
 allows only rebind children of blocked paths; they do not introduce arbitrary
@@ -107,7 +125,9 @@ is granted again after the block. Automatic harness state cannot lift a
 built-in block, even when a state symlink points inside it. A project that is
 itself a built-in block, or lies inside one, is granted: selecting the project is an
 explicit choice, as in default mode. A custom block that covers the whole
-project is refused in both modes.
+project is refused unless an authoritative grant reopens it. A read-only
+grant at or below that block can reopen project reads while keeping the
+project read-only. A broader read-only grant does not lift nested custom blocks.
 
 The project exception covers only the project and its descendants, including
 under automatic harness state: with `~/.aws -> ~/.codex/aws`, selecting
@@ -213,3 +233,35 @@ closed. Standard streams and explicitly allowed pathname Unix sockets can still
 carry data or authority. A Docker socket grant, for example, gives access to
 the service behind that socket. Read-only project access does not make the
 entire sandbox read-only.
+
+## macOS strict descendant teardown
+
+Seatbelt has no session lifetime boundary. In strict mode, scode adds a
+unique pair of existing marker files to the profile: one denies reads and
+the other permits reads. Both files and the helper snapshot are protected
+against sandboxed writes. The helper runs outside Seatbelt at exit, before
+scratch accounting and removal. It enumerates processes and uses
+`sandbox_check` to identify this pair of permissions, regardless of parent,
+process group, `setsid`, or double fork. It sends SIGTERM, rescans during a
+one-second grace period, then sends SIGKILL and rescans for up to one second.
+Signals use Darwin audit tokens with PID generations, so PID reuse cannot
+redirect a signal to a different process.
+
+Every launch checks the API against a sandboxed probe and the unsandboxed
+parent, including rejection of a stale PID generation. This requires the
+installed `lib/scode/strict-teardown.py` and `/usr/bin/python3`. If identity
+or generation-checked signaling is unavailable, scode warns that detached
+descendants may survive. It does not fall back to process names, environment
+markers, or process-group guesses. An exit-time failure also warns and keeps
+the command's exit status.
+
+Runtime tests on macOS 27.2 (26B123, arm64) killed a TERM-ignoring,
+double-forked `setsid` descendant after normal exit, a logged run, and parent
+TERM and QUIT. They also preserved an unrelated process and a concurrent scode
+sandbox. These tests do not establish a kernel lifetime boundary: SIGKILL
+of scode prevents its exit trap, API failures can prevent identification,
+and continuous forking or uninterruptible processes can exceed the bounded
+cleanup window. A process whose sandbox no longer exposes the identifying
+permission pair cannot be classified by this mechanism. Default mode has
+no descendant sweep. macOS versions other than the tested one require their
+own runtime evidence.

@@ -68,6 +68,8 @@ on arbitrary network filesystems.
 
 Append failure warns and attempts a newline to terminate a partial record.
 Accounting failures do not replace the command's result or suppress teardown.
-An abrupt kill or host failure can prevent any record. A surviving child,
-including the [PID-directed QUIT case](platforms.md#signals), means an exit
-record need not mark the end of all descendant work.
+An abrupt kill or host failure can prevent any record. macOS strict mode
+[sweeps identified descendants](policy.md#macos-strict-descendant-teardown)
+before measuring scratch. Its documented failure cases, or default mode's
+surviving children, mean an exit record need not mark the end of all
+descendant work.

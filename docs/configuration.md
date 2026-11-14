@@ -15,6 +15,7 @@ See [policy precedence](policy.md#precedence) for how the sources combine.
 |---|---|---|---|---|
 | `blocked` | List of literal paths | Built-in path lists | May add blocks | `--block PATH` |
 | `allowed` | List of literal paths | No explicit grants | Cannot authorize paths | `--allow PATH` |
+| `allowed_ro` | List of literal paths | No explicit grants | Cannot authorize paths | `--allow-ro PATH` |
 | `net` | `on`, `off` | `on` | Only `off` tightens | `--no-net` |
 | `fs_mode` | `rw`, `ro` | `rw` | Only `ro` tightens | `--ro` / `--rw` |
 | `strict` | `true`, `false` | `false` | Only `true` tightens | `--strict` |
@@ -29,7 +30,7 @@ credential synchronization, logging, or `--keep-env`.
 ## Supported format
 
 This is a line-oriented subset, not a general YAML parser. Use lowercase keys,
-scalar values from the table, and `blocked:` / `allowed:` sections with
+scalar values from the table, and `blocked:` / `allowed:` / `allowed_ro:` sections with
 dash-prefixed path lines. Blank lines, full-line comments, CRLF, and a missing
 final newline are accepted. Indentation does not establish a nested structure.
 Scalars may follow lists; a scalar ends the current list section.

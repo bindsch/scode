@@ -7,6 +7,26 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- Repeatable `--allow-ro PATH` and user-config `allowed_ro:` grants reopen
+  reads and execution inside blocked stores without granting writes. They
+  work in strict mode, resolve like `--allow`, and appear in dry-run output.
+  CLI blocks override config grants; project config cannot add authority.
+  Read-only grants cap overlapping writable grants on both backends.
+  Nested blocks remain enforced; missing read-only paths are refused.
+  JSON and legacy log headers record these grants as `allowed_ro`.
+
+### Fixed
+
+- macOS strict runs sweep detached descendants at exit using a protected
+  per-run Seatbelt permission marker and generation-checked signals. Cleanup
+  sends TERM, waits one second, then KILL, preserving unrelated processes and
+  the command status. Startup probes verify identity and signaling support;
+  unavailable support warns that descendants may survive. macOS 27.2 runtime
+  tests cover double fork, setsid, TERM resistance, logging, interruption, and
+  concurrent runs. This remains bounded cleanup, not a kernel lifetime boundary.
+
 ## [0.6.6] - 2026-11-10
 
 ### Fixed

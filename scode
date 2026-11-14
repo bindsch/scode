@@ -736,6 +736,7 @@ Options:
   --rw                Mount project directory read-write (default)
   --block PATH        Block access to a path (directory or file; can be repeated)
   --allow PATH        Request recursive access (subject to policy precedence; repeatable)
+  --allow-ro PATH     Grant recursive read/exec access, never writes (repeatable)
   --strict            Deny-default; project, system, scratch, and detected harness grants
   --trust LEVEL       Named trust preset: trusted, standard, untrusted (singleton)
   --config FILE       Use FILE as config (default: ~/.config/scode/sandbox.yaml; singleton)
@@ -750,7 +751,7 @@ Options:
   --dry-run           Print sandbox profile/command without executing
 
 Path Semantics:
-  Relative paths for --block/--allow and config blocked/allowed are resolved
+  Relative paths for --block/--allow/--allow-ro and config path lists are resolved
   against the project directory (--cwd, or $PWD by default).
   Allows are recursive. CLI blocks beat config allows; CLI allows can make
   exceptions. Grok blocks, project read-only, and privilege masks remain final.
@@ -798,6 +799,8 @@ Config File:
     blocked:
       - ~/.aws
       - ~/.gnupg
+    allowed_ro:
+      - ~/reference-data
 
 Environment:
   SCODE_CONFIG       Path to config file (default: ~/.config/scode/sandbox.yaml)
@@ -2342,7 +2345,7 @@ parse_yaml_value() {
 # Parse YAML config (simple key: value and list parsing).
 # Usage: parse_config <file> <prefix>
 #   Writes scalars to <PREFIX>_NET, <PREFIX>_STRICT, etc.
-#   Appends list items to <PREFIX>_BLOCKED and <PREFIX>_ALLOWED arrays.
+#   Appends lists to <PREFIX>_BLOCKED, _ALLOWED, and _ALLOWED_RO arrays.
 # Safety: eval is used below to set dynamic variables (for example,
 # CONFIG_NET or PROJECT_STRICT). The prefix is always a hardcoded literal
 # ("CONFIG" or "PROJECT") passed by the
@@ -2384,7 +2387,7 @@ parse_config() {
     if [[ "$line" =~ ^[[:space:]]*([a-z_]+):[[:space:]]*(#.*)?$ ]]; then
       current_section="${BASH_REMATCH[1]}"
       case "$current_section" in
-        blocked|allowed) ;;
+        blocked|allowed|allowed_ro) ;;
         *)
           error "invalid config at line ${line_no}: unknown section '${current_section}' (${cfg_file})"
           exit 1
@@ -2493,6 +2496,9 @@ parse_config() {
           ;;
         allowed)
           eval "${prefix}_ALLOWED+=(\"\$value\")"
+          ;;
+        allowed_ro)
+          eval "${prefix}_ALLOWED_RO+=(\"\$value\")"
           ;;
       esac
       continue
@@ -2676,7 +2682,7 @@ legacy_log_escape() {
 #
 # Usage: write_log_header_json <log_file> [extra_comment_lines...]
 # Expects these globals: REQUESTED_COMMAND[], PROJECT_DIR, ALL_BLOCKED[],
-# ALL_BLOCKED_SOURCES[], ALL_ALLOWED[], HARNESS_STRICT_RO[]
+# ALL_BLOCKED_SOURCES[], ALL_ALLOWED[], ALL_ALLOWED_RO[], HARNESS_STRICT_RO[]
 write_log_header_json() {
   local log_file="$1"
   shift
@@ -2728,6 +2734,14 @@ write_log_header_json() {
     done
     printf ']'
 
+    printf ',"allowed_ro":['
+    first=1
+    for _i in "${!ALL_ALLOWED_RO[@]}"; do
+      [[ "$first" -eq 1 ]] && first=0 || printf ','
+      printf '"%s"' "$(json_escape "${ALL_ALLOWED_RO[$_i]}")"
+    done
+    printf ']'
+
     printf '}\n'
 
     # Legacy comment header (human-readable, parsed by audit_log/audit_watch)
@@ -2742,6 +2756,9 @@ write_log_header_json() {
     done
     for _i in "${!HARNESS_STRICT_RO[@]}"; do
       echo "# allowed: ${HARNESS_STRICT_RO[$_i]}"
+    done
+    for _i in "${!ALL_ALLOWED_RO[@]}"; do
+      echo "# allowed_ro: ${ALL_ALLOWED_RO[$_i]}"
     done
 
     # Extra comment lines (e.g. profile dump, bwrap args)
@@ -2890,8 +2907,8 @@ audit_log() {
       log_blocked_cats+=("${cat}:${bpath}")
       has_log_blocked=1
     fi
-    if [[ "$line" =~ ^#\ allowed:\ (.+)$ ]]; then
-      _aval="${BASH_REMATCH[1]}"
+    if [[ "$line" =~ ^#\ allowed(_ro)?:\ (.+)$ ]]; then
+      _aval="${BASH_REMATCH[2]}"
       [[ "$_aval" == /* ]] || continue
       _contains_control_character "$_aval" && continue
       _aval="${_aval%/}"
@@ -2973,10 +2990,19 @@ audit_log() {
       fi
     done
 
-    # If metadata says this path is allowed, do not classify it as blocked by
-    # default/platform ancestors. Keep custom-block precedence.
+    # Only a grant at/below the block reopens it. An ancestor grant preserves
+    # nested blocks, including when the grant is read-only.
+    local grant reopened=0
     if [[ "$has_log_blocked" -eq 1 && ${#log_allowed[@]} -gt 0 ]]; then
-      if [[ -z "$matched_custom" ]] && is_allowed_in_list "$path" "${log_allowed[@]}"; then
+      for grant in "${log_allowed[@]}"; do
+        if [[ -n "$matched_default_parent" ]] && \
+           is_same_or_descendant_path "$grant" "$matched_default_parent" && \
+           is_same_or_descendant_path "$path" "$grant"; then
+          reopened=1
+          break
+        fi
+      done
+      if [[ -z "$matched_custom" && "$reopened" -eq 1 ]]; then
         uncategorized+=("$path")
         continue
       fi
@@ -3182,6 +3208,10 @@ emit_macos_block_deny() {
     [[ -n "$dir" ]] || continue
     macos_path_in_block "$dir" "$index" strict && exceptions+=("$dir")
   done
+  # Read-only exceptions receive a final write cap after every writable rule.
+  for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
+    macos_path_in_block "$dir" "$index" && exceptions+=("$dir")
+  done
   macos_block_spellings "$1"
   [[ ${MACOS_BLOCK_SPELLINGS[0]+_} ]] || return 0
   echo "(deny file-read* file-write* process-exec"
@@ -3249,7 +3279,8 @@ macos_path_in_any_block() {
 
 # emit_macos_strict_builtin_blocks PROJECT: strict mode denies by default, so
 # a built-in block needs a rule only where a grant covers it. The project,
-# an explicit allow, or detected harness state reopens every built-in block
+# an explicit allow, a read-only allow, or detected harness state reopens
+# every built-in block
 # with a spelling strictly inside it (`--strict -C ~` would expose ~/.ssh), so
 # those blocks are denied again after the grants. A built-in block that is the
 # project or contains it does not apply to the project, as in default mode.
@@ -3259,6 +3290,7 @@ emit_macos_strict_builtin_blocks() {
   local project_dir="$1" i spelling grant dir hit
   local -a grants=("$project_dir") denied=() restored=()
   grants+=(${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"})
+  grants+=(${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"})
   grants+=(${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"})
   for i in "${!ALL_BLOCKED[@]}"; do
     [[ -n "${ALL_BLOCKED[$i]}" ]] || continue
@@ -3921,8 +3953,8 @@ append_bwrap_read_exception() {
 }
 
 # strict_block_in_bound_tree PATH PROJECT BUILTIN: canonical block PATH lies
-# inside a tree strict mode binds (the project, an explicit allow, or
-# detected harness state). A custom block counts when it is the tree itself;
+# inside a tree strict mode binds (the project, an explicit allow, a
+# read-only allow, or detected harness state). A custom block counts when it is the tree itself;
 # a built-in block only when strictly inside, so a built-in block that is the
 # project, or one that a grant names exactly, does not apply to that grant,
 # as in default mode. Callers pass the path bwrap_mount_path resolved.
@@ -3934,6 +3966,7 @@ strict_block_in_bound_tree() {
     return 1
   fi
   for tree in "$project_dir" ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"} \
+      ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"} \
       ${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"}; do
     [[ -n "$tree" ]] || continue
     if [[ "$builtin" -eq 1 ]]; then
@@ -4073,6 +4106,49 @@ append_bwrap_final_policy() {
     fi
     append_bwrap_read_exception "$SCODE_NO_SANDBOX_JS"
   fi
+}
+
+# Read-only grants cap overlapping writable grants. Restore child exceptions
+# in parent-first order, masking nested blocks after each bind. Missing blocks
+# cannot be created on a read-only bind, so need no mount point there.
+append_bwrap_readonly_policy() {
+  local project_dir="$1" path root bdir i project_blocked=0
+  local -a grants=()
+  [[ ${ALL_ALLOWED_RO[0]+_} ]] || return 0
+  grants=("${ALL_ALLOWED_RO[@]}")
+  for i in "${!ALL_BLOCKED[@]}"; do
+    case "${ALL_BLOCKED_SOURCES[$i]}" in config|project|cli|defense) ;; *) continue ;; esac
+    bwrap_mount_path "${ALL_BLOCKED[$i]}" || continue
+    if _path_same_or_under "$project_dir" "$BWRAP_MOUNT_PATH"; then
+      project_blocked=1
+      break
+    fi
+  done
+  for path in "$project_dir" ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
+    # Project selection only overrides built-ins. Explicit RO exceptions
+    # are already in grants and can reopen a custom block deliberately.
+    [[ "$path" == "$project_dir" && "$project_blocked" -eq 1 ]] && continue
+    for root in "${ALL_ALLOWED_RO[@]}"; do
+      if _path_same_or_under "$path" "$root"; then
+        grants+=("$path")
+        break
+      fi
+    done
+  done
+  while IFS= read -r path; do
+    [[ -e "$path" ]] || continue
+    BWRAP_ARGS+=(--ro-bind "$path" "$path")
+    for i in "${!ALL_BLOCKED[@]}"; do
+      bwrap_mount_path "${ALL_BLOCKED[$i]}" || continue
+      bdir="$BWRAP_MOUNT_PATH"
+      [[ -e "$bdir" ]] || continue
+      _path_strictly_under "$bdir" "$path" || continue
+      case "${ALL_BLOCKED_SOURCES[$i]}" in
+        default|platform) [[ "$bdir" == "$project_dir" ]] && continue ;;
+      esac
+      append_bwrap_block "$bdir"
+    done
+  done < <(printf '%s\n' "${grants[@]}" | LC_ALL=C sort -u)
 }
 
 # Build bwrap args for Linux (default mode: allow home, block specific dirs).
@@ -4260,6 +4336,27 @@ SCODE_NO_SANDBOX_JS=""
 SCODE_NO_SANDBOX_LINK=""
 SCODE_NO_SANDBOX_TMPDIR=""
 SAFE_DARWIN_TMPDIR=""
+SCODE_TEARDOWN_DIR=""
+SCODE_TEARDOWN_READY=0
+
+# Run outside Seatbelt, before removing its protected marker files. The helper
+# refuses unverified identities and uses PID generations for every signal.
+# shellcheck disable=SC2329 # Called through the EXIT trap.
+teardown_strict_descendants() {
+  if [[ "$SCODE_TEARDOWN_READY" -eq 1 ]]; then
+    /usr/bin/python3 -I "$SCODE_TEARDOWN_DIR/helper.py" cleanup "$SCODE_TEARDOWN_DIR" || true
+    SCODE_TEARDOWN_READY=0
+  fi
+}
+
+# shellcheck disable=SC2329 # Called by the EXIT trap.
+cleanup_strict_identity() {
+  teardown_strict_descendants
+  if [[ -n "$SCODE_TEARDOWN_DIR" ]]; then
+    rm -f "$SCODE_TEARDOWN_DIR/deny" "$SCODE_TEARDOWN_DIR/allow" "$SCODE_TEARDOWN_DIR/helper.py" 2>/dev/null || true
+    rmdir "$SCODE_TEARDOWN_DIR" 2>/dev/null || true
+  fi
+}
 SCODE_DARWIN_TMPDIR=""
 
 # Usage accounting (opt-in). When SCODE_ACCOUNT_FILE names a writable file,
@@ -4603,9 +4700,10 @@ trap '_scode_trap_rc=$?
       # abandon the remaining cleanup. The captured exit status was
       # taken first and stands. A QUIT run can reach this trap with the
       # engine still alive -- the runners exit 131 from their QUIT
-      # handlers -- and that engine is left running as the documented
-      # orphan trade-off; a follow-up signal must not recurse the
-      # handlers either. A no-op handler (no quoting gymnastics inside
+      # handlers. Strict macOS teardown sweeps it when available;
+      # otherwise it remains as the documented orphan trade-off.
+      # A follow-up signal must not recurse the handlers either.
+      # A no-op handler (no quoting gymnastics inside
       # this string) holds the signals off.
       trap : INT TERM HUP QUIT
       # The trap runs with SIGPIPE ignored: every write it issues is
@@ -4617,6 +4715,7 @@ trap '_scode_trap_rc=$?
       # the run owes the record, the teardown, and the true exit
       # status, and those must survive a dead reader.
       trap "" PIPE
+      cleanup_strict_identity
       write_account_record "$_scode_trap_rc" || true; cleanup_no_sandbox_link; if [[ -n "${_SCODE_PENDING_INT_FILE:-}" ]]; then rm -f "${_SCODE_PENDING_INT_FILE}" 2>/dev/null || true; fi; if [[ -n "${_SCODE_TRAP_BUSY_DIR:-}" ]]; then rm -rf "${_SCODE_TRAP_BUSY_DIR}" 2>/dev/null || true; fi; if [[ -n "${_SCODE_LOG_TMP_DIR:-}" ]]; then rm -rf "${_SCODE_LOG_TMP_DIR}" 2>/dev/null || true; fi' EXIT
 
 # A fatal signal kills bash while $? still holds the last command's status,
@@ -4665,10 +4764,12 @@ PROJECT_DIR=""
 COMMAND=()
 CLI_BLOCKED=()
 CLI_ALLOWED=()
+CLI_ALLOWED_RO=()
 # Env var names exempt from --scrub-env via --keep-env (exact names, deduped).
 KEEP_ENV_NAMES=()
 CONFIG_BLOCKED=()
 CONFIG_ALLOWED=()
+CONFIG_ALLOWED_RO=()
 # String configs init to "" (unset means "use default"); boolean configs also
 # init to "" so explicit false can be distinguished from "not configured".
 # parse_config() sets these via eval with a CONFIG_ prefix.
@@ -4810,13 +4911,17 @@ while [[ $# -gt 0 ]]; do
       CLI_BLOCKED+=("$2")
       shift 2
       ;;
-    --allow)
+    --allow|--allow-ro)
       if [[ $# -lt 2 ]]; then
         error "missing argument for $1"
         exit 1
       fi
       validate_path "$2"
-      CLI_ALLOWED+=("$2")
+      if [[ "$1" == --allow-ro ]]; then
+        CLI_ALLOWED_RO+=("$2")
+      else
+        CLI_ALLOWED+=("$2")
+      fi
       shift 2
       ;;
     --log)
@@ -5397,6 +5502,7 @@ parse_config "${CONFIG_FILE}" "CONFIG"
 PROJECT_CONFIG_FILE="${PROJECT_DIR%/}/.scode.yaml"
 PROJECT_BLOCKED=()
 PROJECT_ALLOWED=()
+PROJECT_ALLOWED_RO=()
 PROJECT_NET=""
 PROJECT_FS_MODE=""
 PROJECT_STRICT=""
@@ -5592,6 +5698,42 @@ _check_project_config_weakens() {
   fi
 }
 _check_project_config_weakens
+
+# Read-only authority is separate: it must never remove a write block.
+ALL_ALLOWED_RO=()
+for dir in ${CLI_ALLOWED_RO[@]+"${CLI_ALLOWED_RO[@]}"}; do
+  _resolved_ro="$(resolve_access_path "$dir" "$PROJECT_DIR")"
+  validate_path "$_resolved_ro"
+  ALL_ALLOWED_RO+=("$_resolved_ro")
+done
+for dir in ${CONFIG_ALLOWED_RO[@]+"${CONFIG_ALLOWED_RO[@]}"}; do
+  _resolved_ro="$(resolve_access_path "$dir" "$PROJECT_DIR")"
+  validate_path "$_resolved_ro"
+  _ro_conflict=0
+  for _block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}; do
+    if paths_overlap_hierarchy "$_resolved_ro" "$_block"; then
+      _ro_conflict=1
+      break
+    fi
+  done
+  [[ "$_ro_conflict" -eq 0 ]] && ALL_ALLOWED_RO+=("$_resolved_ro")
+done
+for dir in ${PROJECT_ALLOWED_RO[@]+"${PROJECT_ALLOWED_RO[@]}"}; do
+  resolve_access_path "$dir" "$PROJECT_DIR" >/dev/null
+  warning "ignoring project config allowed_ro path (project config is restrictive-only): ${dir}"
+done
+for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
+  if [[ ! -e "$dir" ]]; then
+    error "read-only allowed path does not exist: ${dir}"
+    exit 1
+  fi
+  for _block in ${GROK_MANDATORY_BLOCKED[@]+"${GROK_MANDATORY_BLOCKED[@]}"}; do
+    if paths_overlap_hierarchy "$dir" "$_block"; then
+      error "grok_defense conflicts with read-only allowed path: ${dir}"
+      exit 1
+    fi
+  done
+done
 
 # Build authoritative allowed list (CLI + user config only).
 ALL_ALLOWED=()
@@ -5886,6 +6028,16 @@ for _blocked_i in "${!ALL_BLOCKED[@]}"; do
     *) continue ;;
   esac
   if path_in_block "$PROJECT_DIR" "$_blocked_i"; then
+    # Only a grant at or below this block can reopen project reads. A broader
+    # read-only grant leaves this block enforced and cannot satisfy cwd.
+    _project_reads_reopened=0
+    for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
+      if path_in_block "$dir" "$_blocked_i" && is_same_or_descendant_path "$PROJECT_DIR" "$dir"; then
+        _project_reads_reopened=1
+        break
+      fi
+    done
+    [[ "$_project_reads_reopened" -eq 1 ]] && continue
     error "custom block covers the project directory: ${ALL_BLOCKED[$_blocked_i]}"
     error "remove the block or add an authoritative allow for the project"
     exit 1
@@ -6154,6 +6306,25 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     PROFILE=$(generate_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"})
   fi
 
+  # Read-only exceptions follow writable grants, then restore nested blocks.
+  for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
+    _esc_ro="$(sbpl_escape "$dir")"
+    PROFILE="${PROFILE}
+
+; Explicit read-only grant
+(allow file-read* process-exec (subpath \"${_esc_ro}\"))
+(deny file-write* (subpath \"${_esc_ro}\"))"
+    _ro_ancestor="$(dirname "$dir")"
+    while :; do
+      PROFILE="${PROFILE}
+(allow file-read-metadata (literal \"$(sbpl_escape "$_ro_ancestor")\"))"
+      [[ "$_ro_ancestor" == / ]] && break
+      _ro_ancestor="$(dirname "$_ro_ancestor")"
+    done
+  done
+  PROFILE="${PROFILE}
+$(emit_macos_redeny_inside "$PROJECT_DIR" ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"})"
+
   # Append allow for command binary if it falls under a blocked path.
   # In sandbox-exec, later rules override earlier ones.
   if [[ -n "${COMMAND_BINARY_PATH}" && "$_command_has_custom_block" -eq 0 ]]; then
@@ -6187,6 +6358,26 @@ if [[ "$PLATFORM" == "darwin" ]]; then
 
 ; Privilege command restriction (final)
 (deny process-exec (regex #\"(/|^)(sudo|su|login|doas|pkexec)$\"))"
+
+  if [[ "$STRICT" -eq 1 ]]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      PROFILE="${PROFILE}
+
+; Strict teardown is conditional on /usr/bin/python3, the helper, and a successful probe.
+; When available: protected markers identify descendants; TERM, 1 second grace, then KILL.
+; Otherwise a warning reports that detached descendants may survive."
+    elif [[ -x /usr/bin/python3 && -f "$SCODE_LIB_DIR/strict-teardown.py" ]]; then
+      SCODE_TEARDOWN_DIR="$(mktemp -d "${_tmp_root%/}/scode.teardown.XXXXXXXX")"
+      cp "$SCODE_LIB_DIR/strict-teardown.py" "$SCODE_TEARDOWN_DIR/helper.py"
+      if _identity_profile="$(/usr/bin/python3 -I "$SCODE_TEARDOWN_DIR/helper.py" prepare "$SCODE_TEARDOWN_DIR")"; then
+        SCODE_TEARDOWN_READY=1
+        PROFILE="${PROFILE}
+${_identity_profile}"
+      fi
+    else
+      warning "strict descendant teardown unavailable: Python/helper missing; detached descendants may survive"
+    fi
+  fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "${PROFILE}"
@@ -6243,6 +6434,8 @@ elif [[ "$PLATFORM" == "linux" ]]; then
   else
     build_bwrap_args "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"}
   fi
+
+  append_bwrap_readonly_policy "$PROJECT_DIR"
 
   # Re-bind the exact command under a default/platform block only.
   # Every retained custom-policy source suppresses this exception.

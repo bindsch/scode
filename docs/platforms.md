@@ -31,8 +31,10 @@ user-owned mode-0700 `/private/var/folders/.../T` parent, otherwise under
 `/private/tmp`. Strict mode permits that directory while denying shared temp.
 Default mode still allows other shared temp paths unless blocked.
 
-Linux uses a private `/tmp` tmpfs. Scratch cleanup is best effort; descendants
-that survive scode can continue running while cleanup is attempted.
+Linux uses a private `/tmp` tmpfs. macOS strict mode performs a verified
+[per-run descendant sweep](policy.md#macos-strict-descendant-teardown) before
+scratch cleanup. Cleanup remains best effort when the identity API is
+unavailable, scode receives SIGKILL, or the bounded sweep cannot finish.
 [Accounting](accounting.md) measures only the macOS private scratch directory.
 
 The macOS backend uses deprecated sandbox-exec and private `system.sb`
@@ -52,7 +54,7 @@ sent to its foreground terminal group.
 | Terminal classification unavailable | Falls back to forwarding |
 | INT queued before launch | Pending marker is read after signal restoration; engine can be prevented from launching, with status 130 |
 | TERM/HUP queued before launch | Delivered after the engine PID becomes available |
-| QUIT | Not forwarded. scode exits 131 and runs accounting/cleanup. A terminal-group QUIT can kill the engine directly; PID-only QUIT can leave it alive. |
+| QUIT | Not forwarded. scode exits 131 and runs accounting/cleanup. macOS strict cleanup sweeps identified sandbox members; without it, PID-only QUIT can leave the engine alive. |
 | KILL | No trap, accounting, or cleanup guarantee |
 
 For fatal engine signals, the conventional statuses are INT 130, HUP 129,

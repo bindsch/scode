@@ -40,12 +40,14 @@ install: check-prefix
 	install -d "$(EXAMPLESDIR)"
 	install -m 755 scode "$(BINDIR)/scode"
 	install -m 644 lib/no-sandbox.js "$(LIBDIR)/no-sandbox.js"
+	install -m 644 lib/strict-teardown.py "$(LIBDIR)/strict-teardown.py"
 	install -m 644 LICENSE "$(SHAREDIR)/LICENSE"
 	install -m 644 $(EXAMPLE_FILES) "$(EXAMPLESDIR)/"
 
 uninstall: check-prefix
 	rm -f "$(BINDIR)/scode"
 	rm -f "$(LIBDIR)/no-sandbox.js"
+	rm -f "$(LIBDIR)/strict-teardown.py"
 	rm -f "$(SHAREDIR)/LICENSE"
 	rm -f $(addprefix "$(EXAMPLESDIR)/",$(notdir $(EXAMPLE_FILES)))
 	rmdir "$(EXAMPLESDIR)" 2>/dev/null || true

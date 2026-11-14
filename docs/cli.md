@@ -19,6 +19,7 @@ harness-specific state access, not a requirement to use a known harness.
 | `--ro` / `--rw` | Project read-only / read-write; default read-write |
 | `--block PATH` | Add a file or directory block |
 | `--allow PATH` | Request recursive read-write access; subject to [precedence](policy.md#precedence) |
+| `--allow-ro PATH` | Grant recursive reads and execution with a write cap, including in strict mode |
 | `--strict` | Deny-default filesystem policy with system, project, scratch, and detected harness grants |
 | `--trust LEVEL` | `trusted`, `standard`, or `untrusted`; see [presets](policy.md#trust-presets) |
 | `--config FILE` | Select user configuration |
@@ -35,7 +36,7 @@ the command, even if they look like scode flags. `--option=value` and bundled
 short flags are unsupported. Values must be separate arguments.
 
 `--cwd`, `--config`, `--log`, and `--trust` are singletons; repeats fail.
-`--block`, `--allow`, and `--keep-env` accumulate. Repeated `--ro` and
+`--block`, `--allow`, `--allow-ro`, and `--keep-env` accumulate. Repeated `--ro` and
 `--rw` use the last value. Other Boolean flags are idempotent.
 Explicit scalar flags override trust presets regardless of their position.
 
@@ -47,7 +48,7 @@ Use `scode -- audit ...` to launch a command literally named `audit`.
 | Input | Relative base and handling |
 |---|---|
 | `--cwd DIR` | Invoking directory; must resolve to an existing directory |
-| `--block`, `--allow`, config `blocked` / `allowed` | Selected project, including entries from a user config elsewhere |
+| `--block`, `--allow`, `--allow-ro`, config `blocked` / `allowed` / `allowed_ro` | Selected project, including entries from a user config elsewhere |
 | `--config`, `SCODE_CONFIG` | Invoking directory |
 | `--log FILE` | Invoking directory; destination symlink is replaced, not followed |
 | `audit FILE` | Invoking directory; shell expansion applies |

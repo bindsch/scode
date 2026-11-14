@@ -16,6 +16,7 @@ load test_helper
 
   [ -x "$prefix/bin/scode" ]
   [ -f "$prefix/lib/scode/no-sandbox.js" ]
+  [ -f "$prefix/lib/scode/strict-teardown.py" ]
   [ -f "$prefix/share/scode/LICENSE" ]
 
   [ -f "$prefix/share/scode/examples/sandbox.yaml" ]
@@ -41,6 +42,7 @@ load test_helper
   [ "$status" -eq 0 ]
   [ ! -e "$prefix/bin/scode" ]
   [ ! -e "$prefix/lib/scode/no-sandbox.js" ]
+  [ ! -e "$prefix/lib/scode/strict-teardown.py" ]
   [ ! -e "$prefix/share/scode/LICENSE" ]
   [ -f "$prefix/share/scode/examples/unrelated.yaml" ]
 

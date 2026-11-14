@@ -42,17 +42,18 @@ The first line begins `#json:`, followed by one JSON object:
 | `argv` | array of strings | Exact requested argument boundaries before execution rewriting |
 | `cwd` | string | Canonical selected project |
 | `blocked` | array of objects | Each has string `source` and `path` |
-| `allowed` | array of strings | Explicit grants plus automatic strict harness state |
+| `allowed` | array of strings | Explicit writable grants plus automatic strict harness state (including its read-only paths) |
+| `allowed_ro` | array of strings | Explicit CLI and user-config read-only grants; absent in older logs |
 
 Block sources are `default`, `platform`, `config`, `project`, `cli`,
 and `defense`. The header is policy metadata, not a complete authority model:
 system paths, project access, and runtime exceptions also matter.
 
 ```json
-{"version":1,"session":"2026-10-13T10:00:00+0200","command":"tool two words","argv":["tool","two words"],"cwd":"/work/project","blocked":[{"source":"cli","path":"/work/project/private"}],"allowed":["/work/reference"]}
+{"version":1,"session":"2026-10-13T10:00:00+0200","command":"tool two words","argv":["tool","two words"],"cwd":"/work/project","blocked":[{"source":"cli","path":"/work/project/private"}],"allowed":["/work/reference"],"allowed_ro":["/work/manual"]}
 ```
 
-Legacy `# command:`, `# cwd:`, `# blocked:`, and `# allowed:` lines follow,
+Legacy `# command:`, `# cwd:`, `# blocked:`, `# allowed:`, and `# allowed_ro:` lines follow,
 then profile/engine comments and `#---`. The built-in audit parser reads those
 legacy lines, not the JSON object. Logs without blocked metadata fall back to
 built-in defaults. External tools should consume `argv` instead of splitting
