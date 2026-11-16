@@ -59,7 +59,7 @@ runtime coverage. CI performs the collection/download/merge in the
 
 The descriptor-closing engine launcher is excluded because it closes kcov's
 reporting descriptor and execs. Declarative tables and marked macOS
-profile/credential blocks are also excluded from the denominator.
+profile blocks are also excluded from the denominator.
 Both platforms collect coverage; excluded macOS code is not measured just
 because macOS has a coverage job. Exact signal tests skip under kcov because
 its extra process changes signal delivery.

@@ -106,7 +106,7 @@ wait_for_file() {
   [[ "$output" != *"$HOME/Library/Preferences"* ]]
 }
 
-@test "dry-run: macOS does not auto-allow ~/Library/Keychains" {
+@test "dry-run: macOS does not auto-allow Keychains for an unknown command" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   run dry_run_cmd true
   [ "$status" -eq 0 ]

@@ -34,10 +34,11 @@ Linux supplies private `/proc` and `/dev`. Its default runtime bind requires
 |---|---|---|
 | `standard` | No overrides; same as omitting `--trust` | Normal config precedence |
 | `trusted` | Read-write project, network on, strict off, scrub off | Default path blocks still apply |
-| `untrusted` | Read-only project, network off, strict on, scrub on | Disables automatic harness-state grants and Claude credential copying |
+| `untrusted` | Read-only project, network off, strict on, scrub on | Disables automatic harness-state and Keychain grants |
 
 The four explicit flags `--strict --no-net --scrub-env --ro` do not disable
-automatic harness grants or copying. They are not equivalent to `untrusted`.
+automatic harness-state grants or opt-in macOS login-store grants. They are not
+equivalent to `untrusted`. scode never reads or copies a login.
 
 Presets override config scalars for their four settings. Explicit CLI scalar
 flags override presets. Config path grants still apply. Selecting a credential
@@ -58,16 +59,17 @@ Path policy has separate rules; it is not a single last-option-wins list:
 | Built-in/platform blocks | Removed when covered by an explicit CLI or user-config allow |
 | User/project blocks | Retained unless explicitly reopened by a user-config or CLI allow |
 | CLI blocks | Beat overlapping config allows in either ancestor direction; CLI allows can make exceptions |
-| Project `allowed` / `allowed_ro` | Never authorizes access; redundant entries add no authority |
+| Project `allowed` / `allowed_ro` / `allowed_staged` | Never authorizes access; redundant entries add no authority |
 | Project grant | Reopens a project inside a built-in blocked parent; built-in and custom blocks inside the project stay blocked in both modes; a custom block covering the project requires an authoritative read or read-write grant |
 | Internal command/preload grants | Cannot override retained custom blocks; the command exception applies only to default/platform blocks |
 | Automatic harness state | Read-write; skipped under `untrusted`, outside effective HOME after symlink resolution, or when blocked; built-in blocks inside state remain denied |
+| macOS login store | Off by default; `--login-store` or user `login_store: true` opts in; `--no-login-store`, `no_login_store: true`, `untrusted`, or a custom block on either path suppresses the whole grant |
 | Explicit child allow | Can reopen a child of a blocked parent; allowing a parent also covers descendants |
 | Grok mandatory blocks | Overlapping explicit allows are refused |
 | Final project read-only rule | `--ro` remains effective even with a broader writable grant |
 | Privilege-command restriction | Reasserted after all grants in this working tree; see below |
 
-Order among `--allow`, `--allow-ro`, and `--block` flags does not determine
+Order among `--allow`, `--allow-ro`, `--allow-staged`, and `--block` flags does not determine
 precedence. `--allow` grants reads and writes. Repeatable `--allow-ro PATH`
 grants reads and execution while capping writes at read-only, including when
 the project or another writable grant overlaps it. On macOS it emits
@@ -89,6 +91,33 @@ or below a block can reopen that path, but does not lift deeper blocks.
 For example, `--strict --block /store --allow-ro /store/bin/tool` can execute
 that tool without allowing it to change itself or read siblings in `/store`.
 
+Since 0.6.8, macOS `--allow-staged PATH` grants read-write access to the exact
+file and siblings named `PATH.tmp.<8 hex digits>`. The escaped,
+anchored SBPL regex matches case-insensitively across the whole staged path,
+including directory and base names, and adds no directory listing access or
+descendants. It supports creating a missing base file and atomically renaming
+a staging file onto it, in normal and strict modes. Existing directories and
+other non-regular base paths are refused, as are symlinked base files (including
+dangling links). Linked ancestor directories are resolved like `--allow`.
+
+User config `allowed_staged:` has the same authority, except that overlapping
+CLI blocks win, including blocks naming a matching staging sibling. Explicit
+CLI grants can reopen blocks. Project entries add no authority. The untrusted
+preset retains explicit grants, as it does for `--allow`, but adds none
+automatically. Project read-only and `--allow-ro` write caps still apply.
+JSON and legacy logs record the base paths as `allowed_staged`.
+
+The macOS kernel matches this path regex without regard to letter case
+(observed on macOS 27.2.1, also on a case-sensitive volume). This applies to the
+whole staged path, not just the suffix: `/vol/STORE/Login.tmp.ABCDEF12` can match
+a grant for `/vol/store/login`. Block conflict checks compare the whole path without regard
+to ASCII letter case, so a block spelled in another case still wins. Names that are not eight hexadecimal digits
+stay denied.
+
+Linux rejects `--allow-staged` and user-config `allowed_staged:`. The bind-mount
+backend cannot restrict future filenames to this pattern or provide atomic
+replacement through an individual file mount without exposing its directory.
+
 On Linux, paths must exist to be bound. In releases through v0.6.0, default-mode
 allows only rebind children of blocked paths; they do not introduce arbitrary
 host subtrees. This working tree fixes that limitation. Strict mode already
@@ -103,7 +132,21 @@ all possible copies of sensitive data.
 Common blocks include Documents, Desktop, Pictures, Downloads, Music, Movies,
 Videos, SSH/signing keys, cloud/container credentials, password stores,
 package/VCS tokens, and shell/database histories. macOS also blocks all of
-`~/Library`, with no automatic Keychain/browser carve-outs. Linux adds
+`~/Library`, except for opt-in [login-store grants](harnesses.md#claude-code-on-macos)
+for `claude` and `agy` in normal and strict modes. `~/Library/Keychains` is
+read-write; `~/Library/Preferences/com.apple.security.plist` is read-only when
+present. Project `login_store` cannot enable the grant. Every process in an
+enabled sandbox can read without a dialog items whose access list trusts
+`/usr/bin/security`, including the harness login with its refresh token and
+tokens stored by other tools. It can read and copy out `login.keychain-db`,
+encrypted under the account's login password, which can then be attacked offline.
+It can create, modify or delete files in the keychain directory. It cannot change
+the default keychain or search list through the read-only preference file.
+Without the grant, a sandboxed `claude` on macOS falls back to
+`~/.claude/.credentials.json` if one exists and is accessible; scode does not
+inspect that file. See [security](security.md) for manual-grant precedence.
+No browser data is
+automatically granted. Linux adds
 Mozilla, Chrome, Chromium, Brave, Thunderbird, Signal, Flatpak, and Snap state.
 
 When effective HOME differs from account home, the latter is blocked as a whole.

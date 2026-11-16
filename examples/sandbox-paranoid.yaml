@@ -1,7 +1,7 @@
 # scode paranoid sandbox configuration
 # Copy to ~/.config/scode/sandbox.yaml
 #
-# Restrictive scalars; detected harness state and credential copying remain.
+# Restrictive scalars; detected harness state remains. scode never copies logins.
 # For untrusted review: scode --trust untrusted --config this-file.yaml command
 # Built-in rules already block SSH keys, GitHub CLI tokens, and personal data.
 # This profile adds cloud-sync directories.
@@ -11,6 +11,24 @@ strict: true
 net: off
 fs_mode: ro
 scrub_env: true
+login_store: false
+no_login_store: true
+# --no-login-store / no_login_store: true wins over --login-store / login_store:
+# true. Only CLI or user config can opt in; project config cannot enable access.
+# --trust untrusted and blocks on either path also suppress the whole grant.
+# If enabled in another policy, eligible macOS claude/agy runs receive
+# ~/Library/Keychains read-write so the harness can refresh its own item and
+# ~/Library/Preferences/com.apple.security.plist read-only when present.
+# Every process can read Keychain items trusting /usr/bin/security without a
+# dialog, including the harness login with its refresh token and other tools'
+# tokens. It can read and copy out login.keychain-db, encrypted under the account's
+# login password, which can then be attacked offline. It can create, modify or
+# delete files in the keychain directory. It cannot change the default keychain
+# or search list through the read-only preference file. See docs/security.md.
+# Without the grant, sandboxed claude on macOS falls back to
+# ~/.claude/.credentials.json if present and accessible; scode does not inspect it.
+# --allow-staged / allowed_staged is explicit authority even under untrusted.
+# It refuses symlinked base files; matching ignores case in the whole staged path.
 
 blocked:
   # Cloud sync

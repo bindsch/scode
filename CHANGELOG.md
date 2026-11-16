@@ -7,6 +7,69 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-11-16
+
+### Added
+
+- Repeatable macOS `--allow-staged PATH` and user-config `allowed_staged:`
+  grant read-write access to the base file and its `.tmp.` siblings
+  with eight hexadecimal digits. The macOS kernel ignores letter case across the
+  whole staged path, including directory and base names, even on case-sensitive
+  volumes. Symlinked base files are refused. Atomic replacement works in normal
+  and strict modes without granting directory listings. CLI block precedence,
+  untrusted explicit-grant rules, and read-only caps remain in force. Linux
+  rejects these grants because bind mounts cannot express the filename bound.
+- `--login-store` and user-config `login_store: true` opt in to macOS login-store
+  access, which is off by default. `--no-login-store` and user/project
+  `no_login_store: true` suppress it even after opt-in, regardless of flag order.
+  Project config cannot enable it; overlapping custom blocks and
+  `--trust untrusted` suppress the whole grant.
+
+### Changed
+
+- Removed Claude credential synchronization, Keychain queries, mirror writes,
+  refresh-token scrubbing and refusals, and credential backup creation and
+  pruning. Existing mirror files and backups are left alone. scode never
+  reads, copies, changes, or checks a harness login.
+- With login-store access enabled, normal and strict macOS `claude` and `agy`
+  runs receive read-write access to `~/Library/Keychains` so the harness can
+  refresh its own item, and read-only access to
+  `~/Library/Preferences/com.apple.security.plist` when present. The invoked
+  harness name must resolve to a regular executable outside the project; native
+  version-number targets and Homebrew `.exe` targets qualify. Interpreter entry
+  scripts and shell `-c` wrappers do not. Both modes report grants or declines.
+  Every process in an enabled sandbox can read Keychain items whose access list
+  trusts `/usr/bin/security` without a dialog, including the harness login with
+  its refresh token and tokens stored by other tools. It can read and copy out
+  `login.keychain-db`, encrypted under the account's login password, which can
+  then be attacked offline. It can create, modify or delete files in the keychain
+  directory. It cannot change the default keychain or search list through the
+  read-only preference file. See `docs/security.md` for manual-grant precedence.
+- Without the grant, a sandboxed `claude` on macOS falls back to
+  `~/.claude/.credentials.json` if one exists and is accessible. scode does not
+  inspect that file and cannot create a stale refresh-token copy; existing copies
+  and backups remain untouched.
+- `--no-credential-sync` remains accepted as a documented no-op for this release.
+
+### Upgrade note
+
+0.6.7 scrubbed or refused a `~/.claude/.credentials.json` that held a refresh token.
+0.6.8 never inspects that file. If you have one from an older file login, after
+confirming that your Keychain login works, remove the file yourself.
+scode prints nothing about login state.
+
+### Tests
+
+- Staged grants are checked under the real macOS sandbox in normal and strict
+  modes: atomic replacement works, and names that are not eight hexadecimal
+  digits, other base names except case variants, and directory listings stay denied.
+- Synthetic macOS kernel tests verify preference reads, denied writes and
+  replacements, and denied creation when absent, with login-store access enabled.
+- Replaced credential-copy tests with an offline no-Keychain gate using fake
+  harnesses, a fake `security`, static launcher checks, and policy assertions.
+- Added a regression check that empty environment values survive
+  `--scrub-env` and `--keep-env` when the variable is retained.
+
 ## [0.6.7] - 2026-11-14
 
 ### Added

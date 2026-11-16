@@ -4,7 +4,7 @@
 # Entries here are merged with built-in defaults:
 #   - "blocked" adds to the default blocked list
 #   - "allowed" requests recursive access, subject to policy precedence
-#   - scalar options (net, fs_mode, strict, scrub_env, grok_defense) set defaults
+#   - scalar options set defaults; see the login-store restrictions below
 #
 # See docs/configuration.md and docs/policy.md for scalar and path precedence.
 #
@@ -12,7 +12,7 @@
 #   personal documents/media and shell/database histories
 #   ~/.ssh, ~/.gnupg, ~/.pki, password stores, and keyrings
 #   cloud/container/IaC credentials and package/VCS tokens
-#   ~/Library (macOS, without automatic credential carve-outs)
+#   ~/Library (macOS; login-store access is off by default)
 #   + additional Linux-specific blocks (browser profiles, keyrings, etc.)
 #
 # See also:
@@ -29,6 +29,20 @@
 # strict: true         # deny-default sandbox (same as --strict)
 # scrub_env: true      # strip API keys from env (same as --scrub-env)
 # grok_defense: true   # harden Grok collection and project-secret access
+# login_store: false  # user config only; true opts in like --login-store
+# no_login_store: true # same as --no-login-store; wins over CLI/user opt-in
+# Project config cannot enable login_store. --trust untrusted and custom blocks
+# on either path suppress the whole grant. When enabled for eligible claude/agy:
+# ~/Library/Keychains is read-write so the harness can refresh its own item;
+# ~/Library/Preferences/com.apple.security.plist is read-only when present.
+# Every process can read Keychain items trusting /usr/bin/security without a
+# dialog, including the harness login with its refresh token and other tools'
+# tokens. It can read and copy out login.keychain-db, encrypted under the account's
+# login password, which can then be attacked offline. It can create, modify or
+# delete files in the keychain directory. It cannot change the default keychain
+# or search list through the read-only preference file. See docs/security.md.
+# Without the grant, sandboxed claude on macOS falls back to
+# ~/.claude/.credentials.json if present and accessible; scode does not inspect it.
 
 # Block additional directories beyond defaults
 # Unquoted scalars allow inline comments. Unquoted list paths containing " #"
@@ -41,3 +55,8 @@ blocked:
 allowed:
   # - ~/Documents/projects
   # - ~/Downloads/datasets
+
+# Bounded file grants (macOS --allow-staged); symlinked base files are refused.
+# Matching ignores case across the whole staged path, including directories.
+allowed_staged:
+  # - '~/state.json' # grants the base and .tmp.<8 hex digits> siblings

@@ -16,21 +16,48 @@ See [policy precedence](policy.md#precedence) for how the sources combine.
 | `blocked` | List of literal paths | Built-in path lists | May add blocks | `--block PATH` |
 | `allowed` | List of literal paths | No explicit grants | Cannot authorize paths | `--allow PATH` |
 | `allowed_ro` | List of literal paths | No explicit grants | Cannot authorize paths | `--allow-ro PATH` |
+| `allowed_staged` | List of file paths; macOS only | No explicit grants | Cannot authorize paths | `--allow-staged PATH` |
 | `net` | `on`, `off` | `on` | Only `off` tightens | `--no-net` |
 | `fs_mode` | `rw`, `ro` | `rw` | Only `ro` tightens | `--ro` / `--rw` |
 | `strict` | `true`, `false` | `false` | Only `true` tightens | `--strict` |
 | `scrub_env` | `true`, `false` | `false` | Only `true` tightens | `--scrub-env` |
+| `login_store` | `true`, `false` | `false` | Cannot enable access | `--login-store` |
+| `no_login_store` | `true`, `false` | `false` | `true` suppresses automatic macOS login-store grants; `false` cannot undo CLI/user suppression | `--no-login-store` |
 | `grok_defense` | `true`, `false` | `false` | Only `true` tightens | Config-only |
 
 User config may set either scalar value. Project permissive values are ignored
 and may warn. Project allows already authorized by the user/CLI are redundant;
 others warn and are ignored. There is no config key for trust presets,
-credential synchronization, logging, or `--keep-env`.
+the legacy `--no-credential-sync` no-op, logging, or `--keep-env`.
+
+Only CLI `--login-store` or user `login_store: true` enables the macOS
+`claude`/`agy` login-store grant. `--no-login-store`, user/project
+`no_login_store: true`, `--trust untrusted`, and custom blocks overlapping either
+path suppress the whole grant even after opt-in. `no_login_store: false` does
+not enable it. The invoked harness name must resolve to a regular executable
+outside the project; native version-number targets qualify, interpreter entry
+scripts and shell `-c` wrappers do not.
+
+The grant makes `~/Library/Keychains` read-write so the harness can refresh its
+own item, and `~/Library/Preferences/com.apple.security.plist` read-only when
+present. Every process in an enabled sandbox can read Keychain items whose access
+list trusts `/usr/bin/security` without a dialog, including the harness login
+with its refresh token and tokens stored by other tools. It can read and copy out
+`login.keychain-db`, encrypted under the account's login password, which can then
+be attacked offline. It can create, modify or delete files in the keychain
+directory. It cannot change the default keychain or search list through the
+read-only preference file. Without the grant, a sandboxed `claude` on macOS falls
+back to `~/.claude/.credentials.json` if one exists and is accessible; scode does
+not inspect that file. See [security](security.md) for manual-grant precedence.
+
+`allowed_staged` (CLI `--allow-staged`) refuses symlinked base files. Matching is
+case-insensitive across the whole staged path, including directory and base
+names, even on a case-sensitive volume.
 
 ## Supported format
 
 This is a line-oriented subset, not a general YAML parser. Use lowercase keys,
-scalar values from the table, and `blocked:` / `allowed:` / `allowed_ro:` sections with
+scalar values from the table, and `blocked:` / `allowed:` / `allowed_ro:` / `allowed_staged:` sections with
 dash-prefixed path lines. Blank lines, full-line comments, CRLF, and a missing
 final newline are accepted. Indentation does not establish a nested structure.
 Scalars may follow lists; a scalar ends the current list section.
@@ -91,7 +118,7 @@ User files are trusted policy and do not use these project-only identity rules.
 |---|---|
 | [Base](../examples/sandbox.yaml) | Commented options and path lists |
 | [Strict](../examples/sandbox-strict.yaml) | Strict mode and cloud-sync blocks; detected harness state remains writable |
-| [Paranoid](../examples/sandbox-paranoid.yaml) | Four restrictive scalars and cloud-sync blocks; still retains automatic harness grants |
+| [Paranoid](../examples/sandbox-paranoid.yaml) | Restrictive scalars, explicit login-store suppression, and cloud-sync blocks; still retains automatic harness-state grants |
 | [Permissive](../examples/sandbox-permissive.yaml) | Explicit reference/data grants with scrubbing |
 | [Cloud engineering](../examples/sandbox-cloud-eng.yaml) | Kubernetes, Docker, Helm grants; these may carry credentials and sockets |
 | [Grok](../examples/sandbox-grok.yaml) | Grok-specific defense |

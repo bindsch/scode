@@ -57,6 +57,7 @@ use an explicit allow for a reviewed custom location.
 
 Copilot's `~/.cache/copilot` grant is cross-platform. Its macOS primary cache
 under `~/Library/Caches/copilot` remains blocked unless explicitly allowed.
+On macOS, `claude` and `agy` can opt in to the login-store grants described below.
 No broad macOS Library grant is added for any harness.
 DeepSeek Harness (`dsh`) has no verified state-path entry.
 
@@ -67,65 +68,59 @@ for project and explicit-grant exceptions.
 
 ## Claude Code on macOS
 
-Claude's macOS subscription login can live in Keychain, hidden by the
-`~/Library` block. For an eligible direct launch, scode copies usable Keychain
-access credentials into `~/.claude/.credentials.json`. The copied OAuth object
-has an empty `refreshToken` and no `refreshTokenExpiresAt`. Other top-level
-file state is preserved. The destination is replaced atomically with mode 0600.
-The state directory must already exist. If the `security` command is
-unavailable, synchronization and its mirrored-token checks are skipped.
+scode never reads, copies, scrubs, backs up, or changes a harness login. It does
+not invoke a Keychain tool, inspect credential files, refuse a launch based on
+their contents, or tell the user to log in based on a credential guess.
+Existing `~/.claude/.credentials.json` files and backups under
+`~/Library/Application Support/scode/credential-backups` are left alone.
 
-This avoids duplicate refresh-token rotation. It still exposes a bearer token
-to anything able to read the file. Authentication lasts only as long as that
-token remains usable; expiration or revocation can produce an authentication
-error. scode does not promise a particular vendor error message.
+Login-store access is off by default. `--login-store` or user-config
+`login_store: true` opts in for normal and strict macOS runs directly launching
+`claude` or `agy`. `~/Library/Keychains` becomes read-write so the harness can
+rewrite its own item when its token refreshes.
+`~/Library/Preferences/com.apple.security.plist` is read-only when it exists;
+creating it when absent is denied. Every process in that sandbox can read
+Keychain items whose access list trusts `/usr/bin/security` without a dialog.
+This includes the harness's login and refresh token, and tokens other tools
+stored through `security`, for example a GitHub CLI token. Every process can read
+and copy out `login.keychain-db`, encrypted under the account's login password,
+which can then be attacked offline. It can create, modify or delete files in the
+keychain directory. It cannot change the default keychain or search list through
+the read-only preference file. Other Library paths remain blocked. The launcher never reads or copies a
+login: one login store means scode cannot create a stale refresh-token copy.
 
-The access-only guarantee applies to successfully synchronized macOS
-Keychain-backed credentials. Linux bypasses synchronization. A macOS file-only
-login with no Keychain item is preserved, including its refresh token.
-Independent environment or application authentication can also remain available.
+The invoked name must be `claude` or `agy` (optionally `.exe`) and its resolved
+target must be a regular executable outside the project. Native installs such as
+`~/.local/bin/claude -> ~/.local/share/claude/versions/2.0.99` and Homebrew targets
+ending in `bin/claude.exe` qualify. Interpreter entry scripts and wrappers,
+including shell `-c` strings, do not qualify. A declined grant reports
+the reason and both paths with their access modes. Redirected login-store paths
+are not automatically granted. Both normal and strict modes report granted paths.
+`--no-login-store` (user config: `no_login_store: true`), an overlapping `--block`,
+or `--trust untrusted` suppresses the whole grant even after opt-in, regardless
+of flag order. CLI, user-config, and project-config blocks on either path apply.
+Project `login_store: true` cannot enable access; project `no_login_store: true`
+can suppress it. Without access, the harness cannot use a Keychain login.
+A sandboxed `claude` on macOS falls back to `~/.claude/.credentials.json` if one
+exists and is accessible; scode does not inspect that file. Explicit grants
+retain their documented precedence. See [security](security.md) for exposure
+and the exact access a manual `--allow` provides.
 
-| Condition | Action |
-|---|---|
-| Eligible direct installed Claude, readable usable Keychain token | Copy access credential unless file already matches without a refresh token |
-| Expired/unusable Keychain token, mirrored file has refresh token | Preserve file's access data but remove refresh token after backup |
-| No usable token and file already lacks refresh token | Leave file alone |
-| No Keychain item (status 44) | Preserve file-only store |
-| Keychain locked/denied, file has mirrored refresh token | Refuse launch |
-| Rewrite or required backup fails with mirrored refresh token present | Refuse launch |
-| `--no-credential-sync` | Skip copying; refuse an accessible mirrored refresh token when detected |
-| Resolved executable other than `claude` or `claude.exe` (including entry scripts and wrappers), in-project Claude binary, in-project state directory, or symlinked credential path | Skip copying, warn; refuse if the mirrored-refresh-token check finds one. Entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH. |
-| Dry-run, blocked credential, or untrusted preset without an explicit state grant | Skip copying |
-| Untrusted preset with explicit state grant | Skip copying; check mirrored-refresh-token refusal |
+`/usr/bin/security` remains executable inside the sandbox, and the existing
+Mach lookup allowances permit access to `securityd`. The harness may use
+those facilities itself. scode does not initiate authentication or password
+dialogs; it cannot promise that a harness or macOS will never display one.
 
-Opting out disables the copy, not authentication. Existing access-only files,
-file-only credentials, or independently supplied authentication may work.
-Synchronization does not rewrite through a symlink; refusal checks may read its
-target. These checks need working system Python. If Python cannot inspect the
-file, it cannot establish that the file lacks a refresh token.
+`--no-credential-sync` is accepted as a compatibility no-op for 0.6.8.
+It neither inspects nor changes authentication. Login compatibility still
+depends on the harness and the user's store.
 
-The untrusted preset's refusal guard checks explicit grants, not every route
-through project selection. Do not select the credential directory itself as an
-untrusted project. General reachability analysis and reliable credential
-inspection failure handling remain deferred.
+For explicit file-based state access, macOS `--allow-staged` / user
+`allowed_staged` grants a base file and its `.tmp.<8 hex digits>` siblings for
+atomic replacement. Symlinked base files are refused. Matching ignores case
+across the whole staged path, including directory and base names, even on
+case-sensitive volumes. See [policy](policy.md#precedence).
 
-## Backup retention and recovery
-
-Before stripping a mirrored refresh token, scode backs up the old file to
-`~/Library/Application Support/scode/credential-backups/credentials.*`.
-The directory is mode 0700 and files are mode 0600. Successful rewrites prune
-strictly older backups, leaving the current backup and any newer concurrent
-backup. Failed rewrites remove their new backup because the original remains.
-The warning reports the relevant random filename; use its modification time
-and that warning to identify it.
-
-The default Library block hides backups, but an explicit allow or project grant
-can expose them. Keep them outside the sandbox's reachable paths. For recovery,
-stop sandboxed Claude runs, preserve the relevant backup privately, and prefer
-a fresh Claude login outside scode. Restoring a refresh token may restore a
-revoked or rotated credential. If an operator must restore the file, do so
-outside the sandbox after checking which store is authoritative; the next sync
-can strip it again. Do not print tokens into logs or commit backups.
 
 ## Cursor Agent on macOS
 
@@ -169,9 +164,7 @@ rather than a file credential store. The v1.3.1 state-path inspection identified
 `~/.gemini/antigravity-cli`, shared `~/.gemini/config`, and root state files.
 A help command that writes no files proves only that help invocation's behavior.
 
-Ordinary scode invocation does not provide an Antigravity credential mirror.
-Recognizing `agy` and granting `~/.gemini` therefore does not make its macOS
-Keychain login available. The integration note recorded codemux supplying a
-private per-run mirror Keychain; verify that behavior against the installed
-codemux version. Do not grant all of `~/Library/Keychains`: access through
-`security` can expose unrelated items and refresh tokens.
+Normal and strict macOS `agy` launches can opt in to the same login-store grants
+as Claude, in addition to the normal `~/.gemini` state access. Antigravity uses its own login Keychain;
+scode does not create a credential file or a private mirror Keychain.
+`--trust untrusted` does not receive those automatic grants.

@@ -179,11 +179,13 @@ load test_helper
   [[ "$output" == *"(subpath \"$HOME/.claude\")"* ]]
 }
 
-@test "strict+harness does not reopen macOS browser or Keychain data" {
+@test "strict+claude opt-in opens the login Keychain but not browser data" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
-  run "$SCODE" --dry-run --strict -C "$TEST_PROJECT" -- claude
+  mkdir -p "$TEST_PROJECT/project" "$TEST_PROJECT/bin"
+  cp "$(type -P true)" "$TEST_PROJECT/bin/claude"
+  run "$SCODE" --dry-run --login-store --strict -C "$TEST_PROJECT/project" -- "$TEST_PROJECT/bin/claude"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" == *"(subpath \"$HOME/Library/Keychains\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Application Support\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Caches\")"* ]]
 }

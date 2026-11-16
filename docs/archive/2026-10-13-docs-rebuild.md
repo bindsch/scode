@@ -1,5 +1,9 @@
 # Documentation rebuild — 2026-10-13
 
+The authentication observations below are historical. Version 0.6.8 removes
+credential synchronization and grants claude/agy access to their own macOS
+login store. See the current [harness guide](../harnesses.md).
+
 Historical snapshot of the uncommitted `docs-rebuild` worktree based on
 `73c385b70226797b2f6a5d4aab9d5b33f56e605f`. No version bump, commit, push,
 code-review run, or external publication was performed.

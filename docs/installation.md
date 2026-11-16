@@ -9,10 +9,9 @@ It does not run the test suite's capability probe.
 
 Signal restoration uses `/usr/bin/python3`, with `/usr/bin/perl` as fallback.
 Without both, scode warns and leaves inherited ignored signal dispositions in
-place; a launch-window Ctrl-C can be lost. macOS Claude credential processing
-requires `/usr/bin/python3` and `security`. Without working Python, credential
-inspection and rewriting are unavailable; do not rely on mirrored-refresh-token
-refusal. See [harnesses](harnesses.md#claude-code-on-macos).
+place; a launch-window Ctrl-C can be lost. scode does not inspect or rewrite
+credentials and has no Keychain-tool dependency. Harnesses may use
+`/usr/bin/security` themselves; see [harnesses](harnesses.md#claude-code-on-macos).
 Node is needed for the browser preload when running Node applications, and for
 development tests, not for every sandbox command.
 
@@ -42,7 +41,7 @@ The commands run in a fail-fast subshell.
 ```sh
 (
   set -eu
-  RELEASE_TAG="v0.6.7"
+  RELEASE_TAG="v0.6.8"
   git clone --filter=blob:none --branch "$RELEASE_TAG" https://github.com/bindsch/scode.git
   cd scode
   release_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"

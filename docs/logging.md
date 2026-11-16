@@ -42,8 +42,9 @@ The first line begins `#json:`, followed by one JSON object:
 | `argv` | array of strings | Exact requested argument boundaries before execution rewriting |
 | `cwd` | string | Canonical selected project |
 | `blocked` | array of objects | Each has string `source` and `path` |
-| `allowed` | array of strings | Explicit writable grants plus automatic strict harness state (including its read-only paths) |
-| `allowed_ro` | array of strings | Explicit CLI and user-config read-only grants; absent in older logs |
+| `allowed` | array of strings | Explicit writable grants, automatic strict harness state (including its read-only paths), and opt-in macOS login-store directory grants in normal and strict modes |
+| `allowed_ro` | array of strings | CLI/user-config read-only grants and the existing security preference file from an enabled macOS login-store grant; absent in older logs |
+| `allowed_staged` | array of strings | Staged-file base paths from CLI and user config; each grants the regular base file and its bounded `.tmp.<8 hex digits>` siblings on macOS; absent in older logs |
 
 Block sources are `default`, `platform`, `config`, `project`, `cli`,
 and `defense`. The header is policy metadata, not a complete authority model:
@@ -53,7 +54,8 @@ system paths, project access, and runtime exceptions also matter.
 {"version":1,"session":"2026-10-13T10:00:00+0200","command":"tool two words","argv":["tool","two words"],"cwd":"/work/project","blocked":[{"source":"cli","path":"/work/project/private"}],"allowed":["/work/reference"],"allowed_ro":["/work/manual"]}
 ```
 
-Legacy `# command:`, `# cwd:`, `# blocked:`, `# allowed:`, and `# allowed_ro:` lines follow,
+Legacy `# command:`, `# cwd:`, `# blocked:`, `# allowed:`, `# allowed_ro:`, and
+`# allowed_staged:` lines follow,
 then profile/engine comments and `#---`. The built-in audit parser reads those
 legacy lines, not the JSON object. Logs without blocked metadata fall back to
 built-in defaults. External tools should consume `argv` instead of splitting
@@ -70,6 +72,9 @@ Batch output groups paths by blocked parent. Default/platform groups can get
 `--allow` suggestions; custom policy groups do not. This grouping is not
 least-authority analysis. One credential-file denial can suggest reopening an
 entire parent directory. Review every suggested subtree before granting it.
+Denials matching a logged `allowed_staged` base or its `.tmp.<8 hex digits>`
+siblings are grouped separately and suggest only `--allow-staged` for that base.
+Staged grants do not cover descendants or other sibling names.
 
 Watch starts at the end of the existing file, ignores old entries, and
 deduplicates new paths for the lifetime of the watcher. It prints new denials

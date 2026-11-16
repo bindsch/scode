@@ -471,24 +471,29 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "strict harness log does not auto-allow macOS Library metadata" {
+@test "project-local harness log contains no automatic macOS login-store grants" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
   require_runtime_sandbox
   local fake_bin="$TEST_PROJECT/fake-bin"
   local fake_claude="$fake_bin/claude"
   local log_file="$TEST_PROJECT/strict-harness.log"
 
-  mkdir -p "$fake_bin"
-  cat > "$fake_claude" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-  chmod +x "$fake_claude"
+  mkdir -p "$fake_bin" "$TEST_PROJECT/home/Library/Keychains" \
+    "$TEST_PROJECT/home/Library/Preferences"
+  export HOME="$(cd "$TEST_PROJECT/home" && pwd -P)"
+  export SCODE_CONFIG="$TEST_PROJECT/empty.yaml"
+  : > "$SCODE_CONFIG"
+  : > "$HOME/Library/Preferences/com.apple.security.plist"
+  cp "$(type -P true)" "$fake_claude"
 
-  PATH="$fake_bin:$PATH" run "$SCODE" --strict --log "$log_file" -C "$TEST_PROJECT" -- claude
+  PATH="$fake_bin:$PATH" run "$SCODE" --login-store --strict --log "$log_file" -C "$TEST_PROJECT" -- claude
   [ "$status" -eq 0 ]
-  run grep "^# allowed: ${HOME}/Library/" "$log_file"
-  [ "$status" -ne 0 ]
+  local library_grants=()
+  while IFS= read -r line; do
+    case "$line" in "# allowed: ${HOME}/Library"*) library_grants+=("$line") ;; esac
+  done < "$log_file"
+  [ "${#library_grants[@]}" -eq 0 ]
+  [[ "$output" == *"resolved harness executable is inside the project"* ]]
 }
 
 @test "audit recognizes custom-blocked paths from log metadata" {
@@ -588,6 +593,73 @@ EOF
   [ "$parent_suggestion_count" -eq 0 ]
   [[ "$output" == *"Not covered by scode defaults"* ]]
   [[ "$output" == *"not in the logged blocked list"* ]]
+}
+
+@test "audit reads a logged staged grant as an allowed path" {
+  local log_file="$TEST_PROJECT/audit-allowed-staged.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-11-16T10:00:00+0100
+# blocked: platform /tmp/scode-parent
+# allowed_staged: /tmp/scode-parent/login
+#---
+deny(file-read-data) /tmp/scode-parent/login
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"  --allow "* ]]
+  [[ "$output" == *"Covered by logged staged-file grants"* ]]
+  [[ "$output" == *"  --allow-staged "*"/scode-parent/login"* ]]
+}
+
+@test "audit staged siblings never suggest allowing the blocked parent" {
+  local log_file="$TEST_PROJECT/audit-staged-sibling.log" source sibling
+  for source in platform cli; do
+    for sibling in 'login.tmp.1234abcd' 'LOGIN.TMP.ABCD1234'; do
+      cat > "$log_file" <<EOF
+# blocked: $source /tmp/scode-parent
+# allowed_staged: /tmp/scode-parent/login
+#---
+deny(file-write-create) /tmp/scode-parent/$sibling
+EOF
+      run "$SCODE" audit "$log_file"
+      [ "$status" -eq 0 ]
+      [[ "$output" == *"Covered by logged staged-file grants"*"$sibling"* ]]
+      [[ "$output" == *"  --allow-staged "*"/scode-parent/login"* ]]
+      [[ "$output" != *"  --allow "* ]]
+      [[ "$output" != *"Blocked by scode defaults:"* && "$output" != *"Blocked by custom policy:"* ]]
+    done
+  done
+}
+
+@test "audit matches a staged base spelled in another letter case" {
+  local log_file="$TEST_PROJECT/audit-staged-case.log"
+  cat > "$log_file" <<'EOF'
+# scode session: 2026-11-16T10:00:00+0100
+# blocked: platform /tmp/scode-parent
+# allowed_staged: /tmp/scode-parent/login
+#---
+deny(file-read-data) /tmp/scode-parent/LOGIN
+EOF
+  run "$SCODE" audit "$log_file"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Covered by logged staged-file grants"* ]]
+  [ "$(echo "$output" | grep -c 'scode-parent$' || true)" -eq 0 ]
+}
+
+@test "audit staged grants do not cover descendants or invalid sibling names" {
+  local log_file="$TEST_PROJECT/audit-staged-bounds.log" name
+  for name in 'login/child' 'login.tmp.1234abcd/child' 'login.tmp.1234567' 'login.tmp.123456789' 'login.tmp.1234abcg' 'other.tmp.1234abcd'; do
+    cat > "$log_file" <<EOF
+# blocked: platform /tmp/scode-parent
+# allowed_staged: /tmp/scode-parent/login
+#---
+deny(file-read-data) /tmp/scode-parent/$name
+EOF
+    run "$SCODE" audit "$log_file"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Covered by logged staged-file grants"* ]]
+    [[ "$output" == *"Blocked by scode defaults:"*"$name"* ]]
+  done
 }
 
 @test "audit with metadata shows metadata-specific caveat for uncategorized" {

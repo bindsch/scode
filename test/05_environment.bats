@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # Environment variables — scrubbing, overrides, browser env
 
+bats_require_minimum_version 1.5.0
+
 load test_helper
 
 # ---------- Browser double-sandbox prevention ----------
@@ -487,6 +489,29 @@ make_stub_harness() {
 }
 
 # ---------- --keep-env ----------
+
+@test "empty environment values survive scrub and keep-env without becoming unset" {
+  require_any_runtime_sandbox
+  local mode
+  for mode in plain scrub keep; do
+    local args=()
+    case "$mode" in
+      scrub) args=(--scrub-env) ;;
+      keep) args=(--scrub-env --keep-env CLAUDE_SECURESTORAGE_CONFIG_DIR,ZAI_API_KEY) ;;
+    esac
+    CLAUDE_SECURESTORAGE_CONFIG_DIR='' ZAI_API_KEY='' run --separate-stderr \
+      "$SCODE" "${args[@]}" -C "$TEST_PROJECT" -- /bin/sh -c '
+        test "${CLAUDE_SECURESTORAGE_CONFIG_DIR+x}" = x &&
+        test -z "$CLAUDE_SECURESTORAGE_CONFIG_DIR" || exit 1
+        if [ "$1" = keep ]; then
+          test "${ZAI_API_KEY+x}" = x && test -z "$ZAI_API_KEY" || exit 2
+        fi
+        printf "EMPTY_VALUES_PRESERVED\n"
+      ' sh "$mode"
+    [ "$status" -eq 0 ]
+    [ "$output" = EMPTY_VALUES_PRESERVED ]
+  done
+}
 
 @test "--keep-env exempts a name from the scrub in the child environment" {
   require_runtime_sandbox

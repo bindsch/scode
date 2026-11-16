@@ -20,14 +20,17 @@ harness-specific state access, not a requirement to use a known harness.
 | `--block PATH` | Add a file or directory block |
 | `--allow PATH` | Request recursive read-write access; subject to [precedence](policy.md#precedence) |
 | `--allow-ro PATH` | Grant recursive reads and execution with a write cap, including in strict mode |
+| `--allow-staged PATH` | macOS 0.6.8+: grant read-write to the exact file and siblings named `PATH.tmp.<8 hex digits>` |
 | `--strict` | Deny-default filesystem policy with system, project, scratch, and detected harness grants |
 | `--trust LEVEL` | `trusted`, `standard`, or `untrusted`; see [presets](policy.md#trust-presets) |
 | `--config FILE` | Select user configuration |
 | `--scrub-env` | Remove variables matching the credential and injection patterns |
-| `--keep-env NAME[,NAME...]` | Exempt exact valid names from scrubbing, except refused injection names |
-| `--no-credential-sync` | Disable macOS Claude Keychain copying; existing authentication can work, and mirrored-refresh-token refusal still applies |
+| `--keep-env NAME[,NAME...]` | Exempt exact valid names from scrubbing, preserving empty values; injection names remain refused |
+| `--no-credential-sync` | Compatibility no-op for 0.6.8; scode never reads, copies, checks, or changes a harness login |
+| `--login-store` | Opt in to macOS `claude`/`agy` login-store access; off by default; see the exposure below |
+| `--no-login-store` | Suppress login-store grants; wins over CLI/user opt-in regardless of order. Explicit path grants retain their authority |
 | `--log FILE` | Replace FILE with private stderr capture; create missing parent directories |
-| `--dry-run` | Print generated policy/command without launching or copying credentials |
+| `--dry-run` | Print generated policy/command without launching |
 
 ## Parsing
 
@@ -36,9 +39,33 @@ the command, even if they look like scode flags. `--option=value` and bundled
 short flags are unsupported. Values must be separate arguments.
 
 `--cwd`, `--config`, `--log`, and `--trust` are singletons; repeats fail.
-`--block`, `--allow`, `--allow-ro`, and `--keep-env` accumulate. Repeated `--ro` and
+`--block`, `--allow`, `--allow-ro`, `--allow-staged`, and `--keep-env` accumulate. Repeated `--ro` and
 `--rw` use the last value. Other Boolean flags are idempotent.
 Explicit scalar flags override trust presets regardless of their position.
+The login-store grant is an exception: `--trust untrusted` always suppresses it.
+
+`--login-store` (user config: `login_store: true`) grants `~/Library/Keychains`
+read-write so the harness can refresh its own item, and
+`~/Library/Preferences/com.apple.security.plist` read-only when it exists.
+`--no-login-store`, user/project `no_login_store: true`, or an overlapping block
+on either path suppresses the whole grant. Project config cannot enable it.
+The invoked harness name must resolve to a regular executable outside the
+project; version-number targets qualify, interpreter entry scripts and shell
+`-c` wrappers do not.
+
+Every process in an enabled sandbox can read Keychain items whose access list
+trusts `/usr/bin/security` without a dialog, including the harness login with its
+refresh token and tokens stored by other tools. It can read and copy out
+`login.keychain-db`, encrypted under the account's login password, which can then
+be attacked offline. It can create, modify or delete files in the keychain
+directory. It cannot change the default keychain or search list through the
+read-only preference file. Without the grant, a sandboxed `claude` on macOS falls
+back to `~/.claude/.credentials.json` if one exists and is accessible; scode does
+not inspect that file. See [security](security.md) for manual-grant precedence.
+
+`--allow-staged` refuses symlinked base files. Its regex matches without regard
+to case across the whole staged path, including directory and base names, even
+on a case-sensitive volume. See [staged grants](policy.md#precedence).
 
 `audit` accepts one logfile, optionally preceded by `--watch` or `-w`.
 Use `scode -- audit ...` to launch a command literally named `audit`.
@@ -48,7 +75,7 @@ Use `scode -- audit ...` to launch a command literally named `audit`.
 | Input | Relative base and handling |
 |---|---|
 | `--cwd DIR` | Invoking directory; must resolve to an existing directory |
-| `--block`, `--allow`, `--allow-ro`, config `blocked` / `allowed` / `allowed_ro` | Selected project, including entries from a user config elsewhere |
+| `--block`, `--allow`, `--allow-ro`, `--allow-staged`, config `blocked` / `allowed` / `allowed_ro` / `allowed_staged` | Selected project, including entries from a user config elsewhere |
 | `--config`, `SCODE_CONFIG` | Invoking directory |
 | `--log FILE` | Invoking directory; destination symlink is replaced, not followed |
 | `audit FILE` | Invoking directory; shell expansion applies |
@@ -84,7 +111,7 @@ policy rendering, not a way to run another platform's sandbox.
 | Situation | Result |
 |---|---|
 | Help, version, successful dry-run or batch audit | 0 |
-| Invalid arguments/config, unsafe paths, missing engine/command, setup or credential refusal | 1 |
+| Invalid arguments/config, unsafe paths, missing engine/command, or setup failure | 1 |
 | Engine launches | Its exit status, including its own handled-signal status |
 | Fatal signal | Usually `128 + signal number`; see [signal table](platforms.md#signals) |
 | QUIT caught by scode | 131; the engine can survive a PID-directed QUIT |

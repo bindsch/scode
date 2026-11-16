@@ -22,7 +22,7 @@ commits, tags, pushes, release publication, or tap changes.
 6. Collect matching macOS/Linux coverage XMLs and source-hash sidecars.
    Follow [coverage collection and transfer](development.md#coverage), then run:
    `make coverage-gate COVERAGE_REPORTS="coverage/shell-darwin.cobertura.xml coverage/shell-linux.cobertura.xml"`.
-7. Complete the controlled credential checks below and inspect packaged files.
+7. Complete the offline login-store gate below and inspect packaged files.
 
 Do not publish a release based only on dry-run or nested-sandbox skips.
 
@@ -49,46 +49,25 @@ source using `cmp` or SHA-256. Run `"$release_prefix/bin/scode" --version`,
 a dry-run, and a real sandbox smoke test. Verify uninstall removes only the
 packaged files and preserves an unrelated fixture.
 
-## Controlled Claude credential verification
+## Offline login-store verification
 
-Use a disposable macOS account or VM with a separate Keychain and fake tokens.
-Do not modify the operator's Keychain or call a provider with fixture tokens.
-Record the scode revision, OS/build/architecture, system Python version,
-installed Claude version, and Keychain state. Disable unrelated user/project
-config and network access.
+Run `bats test/10_credential_sync.bats test/22_login_store.bats` with fixture-only commands and an
+isolated HOME. The gate checks zero calls to a fake `security` on PATH,
+unchanged synthetic credential files and backups, and the generated policy
+for normal, strict, legacy-flag, blocked, and untrusted runs. It verifies default
+denial, CLI/user opt-in, project restrictions, opt-out precedence, native install
+provenance, and read-only preferences. Kernel tests read synthetic preferences
+and deny writes, replacement, and creation when absent. Static checks
+reject credential commands in the launcher because its parent process pins
+PATH and cannot be intercepted by that spy.
 
-Create an executable fixture named `claude` outside the fixture project. It
-must only inspect the JSON file and report Boolean assertions, never token
-values. Create `~/.claude` in that disposable account.
-Using Keychain Access or `security add-generic-password`, create service
-`Claude Code-credentials` with a synthetic JSON object whose
-`claudeAiOauth` has an access token, future `expiresAt` in milliseconds, and
-refresh token. A synthetic credential file can have a different refresh token.
-Use `security delete-generic-password -s Claude Code-credentials` only in
-that disposable account when testing the absent-item case.
+Do not invoke a real harness, read a Keychain, or create Keychain items for
+this gate. The tests establish scode's policy and fixture behavior. They do
+not prove live authentication, refresh behavior, per-item Keychain isolation,
+or the absence of dialogs initiated by a harness or macOS. Live checks need
+separate authorization and a disposable account or VM.
 
-Run `scode --no-net --cwd "$fixture_project" -- "$fixture_bin/claude"`
-for each row. Reset fixtures between rows and record assertions and exit codes:
-
-| Case | Required result |
-|---|---|
-| Readable Keychain and mirrored file | File access token matches; refresh token empty; refresh-token expiry absent; mode 0600 |
-| Mirrored refresh token replaced | Backup contains original fixture; backup dir/file 0700/0600; older backups pruned only after success |
-| Keychain absent | File-only refresh credential preserved |
-| Locked/denied Keychain plus mirrored refresh token | Launch refused with status 1; file preserved |
-| `--no-credential-sync` plus mirrored refresh token | Launch refused |
-| Opt-out plus existing access-only file | Launch allowed; no copy |
-| Wrapper or project-local binary | Copy skipped with warning; mirrored token causes refusal |
-| Symlinked file | Link target not rewritten; mirrored-token check may read it and refuse |
-| Expired Keychain plus access-only file | File unchanged |
-| Dry-run or blocked credential | No copy |
-| Untrusted preset | No automatic copy or state grant |
-
-This procedure verifies scode's file handling, not live Claude authentication.
-If live authentication is also tested, use a disposable vendor account and
-record Claude's exact version and results separately. Keep private raw evidence
-outside the repository; commit only redacted assertions and environment data.
-No controlled Keychain verification was performed by the documentation rebuild.
+See [the release gate](RELEASE-GATE.md) for the login ownership rule.
 
 ## Commit, tag, and validate the tagged tree
 

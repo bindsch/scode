@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.7"
+readonly PROGRAM_VERSION="0.6.8"
 readonly DARWIN_STRICT_SYSTEM_PATHS=(/usr /opt /System /Library /private/var/db
   /private/var/run /private/var/select /private/etc /dev /bin /sbin /etc)
 readonly LINUX_SYSTEM_PATHS=(/usr /opt /lib /lib64 /bin /sbin /etc)
@@ -195,15 +195,11 @@ LINUX_EXTRA_BLOCKED=(
 )
 
 # macOS-specific default blocks
-# ~/Library is blocked wholesale. There are no automatic browser or Keychain
-# carve-outs: both contain high-value cookies, OAuth tokens, and credentials.
-# Use --allow with a specific subdirectory only when a harness requires it.
+# ~/Library is blocked except for opt-in login-store grants for claude and agy.
+# No browser data or other Library subtrees are automatically exposed.
 DARWIN_EXTRA_BLOCKED=(
   "$HOME/Library"
 )
-
-DARWIN_LIBRARY_ALLOWED_RW=()
-DARWIN_LIBRARY_ALLOWED_RO=()
 
 # Linux privilege tools masked inside the sandbox. Ubuntu 26.04 ships sudo-rs:
 # /usr/bin/sudo is an alternatives link to /usr/lib/cargo/bin/sudo, and the
@@ -503,6 +499,9 @@ _realpath() {
   if [[ -d "$anchor" ]]; then
     local anchor_resolved
     anchor_resolved="$(cd "$anchor" && pwd -P)"
+    # The lexical collapse reads one line; reject controls before it can
+    # truncate a linked ancestor of a not-yet-created file.
+    validate_path "$anchor_resolved"
     if [[ "$anchor_resolved" == "/" ]]; then
       _collapse_absolute_path "/${suffix#/}"
     else
@@ -737,6 +736,8 @@ Options:
   --block PATH        Block access to a path (directory or file; can be repeated)
   --allow PATH        Request recursive access (subject to policy precedence; repeatable)
   --allow-ro PATH     Grant recursive read/exec access, never writes (repeatable)
+  --allow-staged PATH Grant read-write to a file and .tmp.<8 hex digits> siblings
+                      (repeatable; macOS only, since 0.6.8)
   --strict            Deny-default; project, system, scratch, and detected harness grants
   --trust LEVEL       Named trust preset: trusted, standard, untrusted (singleton)
   --config FILE       Use FILE as config (default: ~/.config/scode/sandbox.yaml; singleton)
@@ -744,16 +745,19 @@ Options:
   --keep-env NAMES    Exempt comma-separated env var names from --scrub-env
                       (repeatable; names only, no patterns)
   --no-credential-sync
-                      Do not copy Claude Code's Keychain credential to
-                      ~/.claude/.credentials.json (macOS only). Existing auth
-                      can work; mirrored refresh tokens can still refuse launch.
+                      Compatibility no-op for 0.6.8. scode never reads,
+                      copies, changes, or checks a harness login.
+  --login-store       Opt in to macOS claude/agy login-store access (default: off)
+  --no-login-store    Suppress login-store grants; wins over --login-store
   --log FILE          Replace FILE with stderr capture (creates parent dirs; singleton)
   --dry-run           Print sandbox profile/command without executing
 
 Path Semantics:
-  Relative paths for --block/--allow/--allow-ro and config path lists are resolved
+  Relative paths for --block/--allow/--allow-ro/--allow-staged and config lists resolve
   against the project directory (--cwd, or $PWD by default).
-  Allows are recursive. CLI blocks beat config allows; CLI allows can make
+  --allow and --allow-ro are recursive; --allow-staged is bounded to files.
+  Staged base symlinks are refused; matching ignores case in the whole staged path.
+  CLI blocks beat config allows; CLI allows can make
   exceptions. Grok blocks, project read-only, and privilege masks remain final.
   Relative --config/--log paths use the invoking directory.
   Options stop at the command. Use separate values, not --option=value or
@@ -777,7 +781,7 @@ Default Protections:
     Password managers, browser profiles, keyrings, and package tokens
     ~/.npmrc, ~/.netrc, ~/.git-credentials, ~/.pypirc
     ~/.config/gh, ~/.config/glab-cli, ~/.huggingface
-    ~/Library (macOS only — no automatic credential carve-outs)
+    ~/Library (macOS; claude/agy login-store exceptions described below)
     Additional Linux-specific blocks (browser profiles, keyrings, etc.)
 
   Use --allow to override specific defaults:
@@ -791,6 +795,8 @@ Config File:
     fs_mode: ro          # same as --ro
     strict: true         # same as --strict
     scrub_env: true      # same as --scrub-env
+    login_store: false   # user config only; true opts in like --login-store
+    no_login_store: true # wins over CLI/user opt-in, including in project config
     grok_defense: true   # harden Grok collection + block repo history/secrets
 
   Example:
@@ -801,6 +807,8 @@ Config File:
       - ~/.gnupg
     allowed_ro:
       - ~/reference-data
+    allowed_staged:      # macOS only; exact base plus bounded staging siblings
+      - /store/state.json
 
 Environment:
   SCODE_CONFIG       Path to config file (default: ~/.config/scode/sandbox.yaml)
@@ -838,18 +846,38 @@ Strict Mode Auto-Allow:
   When --strict detects a known harness, it automatically allows read-write access to:
     - The harness config/state paths (e.g. ~/.claude for claude)
   Write access is required: harnesses keep their state there, and most rotate
-  their own credential in place. Successful macOS Claude Keychain synchronization
-  writes an access-token-only copy. File-only macOS logins and Linux are exceptions;
-  see docs/harnesses.md. Detection does not certify authentication compatibility.
+  their own credential in place. macOS login-store access is off by default.
+  --login-store or user login_store: true opts in for normal and strict claude/agy
+  runs: ~/Library/Keychains is read-write so the harness can refresh its own item;
+  ~/Library/Preferences/com.apple.security.plist is read-only when it exists.
+  The invoked name must be claude or agy (optionally .exe), resolving to a regular
+  executable outside the project. Version-number targets qualify; interpreter
+  entry scripts and shell -c wrappers do not. Both modes report granted paths.
+  Every process in that sandbox can read Keychain items whose access list trusts
+  /usr/bin/security without a dialog: the harness login including its refresh
+  token, and tokens other tools stored through security (e.g. a GitHub CLI token).
+  It can read and copy out login.keychain-db, encrypted under the account's login
+  password, which can then be attacked offline. It can create, modify or delete
+  files in the keychain directory. It cannot change the default keychain or search
+  list through the read-only preference file. Other Library paths remain blocked.
+  scode never reads or copies a login. The harness uses one login store, so scode
+  cannot create a stale refresh-token copy. Existing copies are left alone.
+  --no-login-store (config: no_login_store: true), an overlapping --block, or
+  --trust untrusted suppresses the grant, even after opt-in. Project login_store
+  cannot enable it. Without access, the harness cannot use a Keychain login.
+  A sandboxed claude on macOS falls back to ~/.claude/.credentials.json if one
+  exists and is accessible; scode does not inspect that file. Explicit --allow
+  retains its authority. See docs/security.md for the exposure and precedence.
+  Detection does not certify authentication compatibility.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
-  --trust untrusted disables harness-state auto-allows entirely.
+  --trust untrusted disables harness-state and Keychain auto-allows entirely.
 
 Trust Presets:
   --trust trusted      Minimal sandbox: rw, network on, no strict, no scrub-env.
                        Overrides config-level settings for these four values.
   --trust standard     Default behavior (same as no --trust flag).
   --trust untrusted    --strict + --no-net + --scrub-env + --ro, without automatic
-                       harness grants or Claude copying. Overrides config scalars;
+                       harness grants. Overrides config scalars;
                        config allows and the project grant still apply.
   Explicit flags (--rw, --strict, etc.) override --trust settings.
 
@@ -2184,6 +2212,11 @@ _detect_harness_from_shell_words() {
 # patterns. The whole walk lives in _detect_harness_from_args, which
 # recurses into shell -c strings itself.
 detect_harness() {
+  # Native installers may resolve a named launcher to a version-number file.
+  case "${REQUESTED_COMMAND[0]##*/}" in
+    claude|claude.exe) echo claude; return ;;
+    agy|agy.exe) echo agy; return ;;
+  esac
   _detect_harness_from_args "${COMMAND[@]}"
 }
 
@@ -2257,6 +2290,57 @@ sbpl_escape() {
   p="${p//\\/\\\\}"
   p="${p//\"/\\\"}"
   printf '%s\n' "$p"
+}
+
+# Anchor the whole filename. Use an ordinary SBPL string (not a #"" literal)
+# to quote paths containing double quotes. Repeat the class to make the
+# eight-character suffix explicit.
+staged_path_regex() {
+  local path="$1" result="" char i
+  validate_path "$path"
+  for ((i=0; i<${#path}; i++)); do
+    char="${path:i:1}"
+    case "$char" in
+      '.'|'['|']'|'('|')'|'{'|'}'|'*'|'+'|'?'|'^'|'$'|'|'|\\) result+="\\$char" ;;
+      *) result+="$char" ;;
+    esac
+  done
+  sbpl_escape "^${result}\\.tmp\\.[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]$"
+}
+
+# A staged grant includes the base and its bounded sibling names, not the
+# containing directory. Include descendants in conflict checks, like --allow.
+# The kernel matches the staged regex without regard to letter case over the
+# whole path, so a block spelled in another case names the same grant.
+staged_grant_overlaps_block() {
+  local base block suffix
+  base="$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  block="$(printf '%s' "$2" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  paths_overlap_hierarchy "$base" "$block" && return 0
+  [[ "$block" == "$base.tmp."* ]] || return 1
+  suffix="${block#"$base.tmp."}"
+  suffix="${suffix%%/*}"
+  [[ "$suffix" =~ ^[0-9a-f]{8}$ ]]
+}
+
+emit_macos_staged_grants() {
+  local path
+  for path in ${ALL_ALLOWED_STAGED[@]+"${ALL_ALLOWED_STAGED[@]}"}; do
+    printf '\n; Explicit staged-file grant\n(allow file-read* file-write*\n'
+    echo '  (require-all'
+    echo '    (vnode-type REGULAR-FILE)'
+    printf '    (require-any (literal "%s") (regex "%s"))\n' \
+      "$(sbpl_escape "$path")" "$(staged_path_regex "$path")"
+    # Keep the final project read-only invariant, even for explicit grants.
+    if [[ "$FS_MODE" == ro ]]; then
+      printf '    (require-not (subpath "%s"))\n' "$(sbpl_escape "$PROJECT_DIR")"
+    fi
+    echo '  ))'
+    if [[ "$FS_MODE" == ro ]]; then
+      printf '(allow file-read* (require-all (vnode-type REGULAR-FILE) (require-any (literal "%s") (regex "%s"))))\n' \
+        "$(sbpl_escape "$path")" "$(staged_path_regex "$path")"
+    fi
+  done
 }
 
 # Expand ~ and resolve path in the current shell context.
@@ -2345,7 +2429,7 @@ parse_yaml_value() {
 # Parse YAML config (simple key: value and list parsing).
 # Usage: parse_config <file> <prefix>
 #   Writes scalars to <PREFIX>_NET, <PREFIX>_STRICT, etc.
-#   Appends lists to <PREFIX>_BLOCKED, _ALLOWED, and _ALLOWED_RO arrays.
+#   Appends lists to <PREFIX>_BLOCKED, _ALLOWED, _ALLOWED_RO, _ALLOWED_STAGED.
 # Safety: eval is used below to set dynamic variables (for example,
 # CONFIG_NET or PROJECT_STRICT). The prefix is always a hardcoded literal
 # ("CONFIG" or "PROJECT") passed by the
@@ -2387,7 +2471,7 @@ parse_config() {
     if [[ "$line" =~ ^[[:space:]]*([a-z_]+):[[:space:]]*(#.*)?$ ]]; then
       current_section="${BASH_REMATCH[1]}"
       case "$current_section" in
-        blocked|allowed|allowed_ro) ;;
+        blocked|allowed|allowed_ro|allowed_staged) ;;
         *)
           error "invalid config at line ${line_no}: unknown section '${current_section}' (${cfg_file})"
           exit 1
@@ -2440,6 +2524,20 @@ parse_config() {
               fi
               ;;
             *) error "invalid config: scrub_env: $val (expected 'true' or 'false') (${cfg_file})"; exit 1 ;;
+          esac
+          ;;
+        login_store)
+          case "$val" in
+            true) eval "${prefix}_LOGIN_STORE=1" ;;
+            false) eval "${prefix}_LOGIN_STORE=0" ;;
+            *) error "invalid config: login_store: $val (expected 'true' or 'false') (${cfg_file})"; exit 1 ;;
+          esac
+          ;;
+        no_login_store)
+          case "$val" in
+            true) eval "${prefix}_NO_LOGIN_STORE=1" ;;
+            false) eval "${prefix}_NO_LOGIN_STORE=0" ;;
+            *) error "invalid config: no_login_store: $val (expected 'true' or 'false') (${cfg_file})"; exit 1 ;;
           esac
           ;;
         grok_defense)
@@ -2499,6 +2597,9 @@ parse_config() {
           ;;
         allowed_ro)
           eval "${prefix}_ALLOWED_RO+=(\"\$value\")"
+          ;;
+        allowed_staged)
+          eval "${prefix}_ALLOWED_STAGED+=(\"\$value\")"
           ;;
       esac
       continue
@@ -2682,7 +2783,7 @@ legacy_log_escape() {
 #
 # Usage: write_log_header_json <log_file> [extra_comment_lines...]
 # Expects these globals: REQUESTED_COMMAND[], PROJECT_DIR, ALL_BLOCKED[],
-# ALL_BLOCKED_SOURCES[], ALL_ALLOWED[], ALL_ALLOWED_RO[], HARNESS_STRICT_RO[]
+# ALL_BLOCKED_SOURCES[], ALL_ALLOWED[], ALL_ALLOWED_RO[], ALL_ALLOWED_STAGED[], HARNESS_STRICT_RO[]
 write_log_header_json() {
   local log_file="$1"
   shift
@@ -2742,6 +2843,14 @@ write_log_header_json() {
     done
     printf ']'
 
+    printf ',"allowed_staged":['
+    first=1
+    for _i in "${!ALL_ALLOWED_STAGED[@]}"; do
+      [[ "$first" -eq 1 ]] && first=0 || printf ','
+      printf '"%s"' "$(json_escape "${ALL_ALLOWED_STAGED[$_i]}")"
+    done
+    printf ']'
+
     printf '}\n'
 
     # Legacy comment header (human-readable, parsed by audit_log/audit_watch)
@@ -2759,6 +2868,9 @@ write_log_header_json() {
     done
     for _i in "${!ALL_ALLOWED_RO[@]}"; do
       echo "# allowed_ro: ${ALL_ALLOWED_RO[$_i]}"
+    done
+    for _i in "${!ALL_ALLOWED_STAGED[@]}"; do
+      echo "# allowed_staged: ${ALL_ALLOWED_STAGED[$_i]}"
     done
 
     # Extra comment lines (e.g. profile dump, bwrap args)
@@ -2875,11 +2987,12 @@ audit_log() {
   # Collect unique denied paths
   local denied_paths=()
   local seen_paths=()
-  local line _cwd_candidate _aval
+  local line _cwd_candidate _aval _akind
 
   # Parse "# blocked:" metadata from log header (if present)
   local log_blocked_cats=()
   local log_allowed=()
+  local log_allowed_staged=()
   local has_log_blocked=0
   local log_cwd=""
   while IFS= read -r line; do
@@ -2907,13 +3020,18 @@ audit_log() {
       log_blocked_cats+=("${cat}:${bpath}")
       has_log_blocked=1
     fi
-    if [[ "$line" =~ ^#\ allowed(_ro)?:\ (.+)$ ]]; then
+    if [[ "$line" =~ ^#\ allowed(_ro|_staged)?:\ (.+)$ ]]; then
+      _akind="${BASH_REMATCH[1]}"
       _aval="${BASH_REMATCH[2]}"
       [[ "$_aval" == /* ]] || continue
       _contains_control_character "$_aval" && continue
       _aval="${_aval%/}"
       _aval="$(_realpath "$_aval")"
-      log_allowed+=("$_aval")
+      if [[ "$_akind" == _staged ]]; then
+        log_allowed_staged+=("$_aval")
+      else
+        log_allowed+=("$_aval")
+      fi
     fi
   done < "$log_file"
 
@@ -2966,8 +3084,30 @@ audit_log() {
   # Categorize each denied path
   local cat_default=()
   local cat_custom=()
+  local cat_staged=()
   local uncategorized=()
   for path in "${denied_paths[@]}"; do
+    # Staged grants cover exact filenames, never recursive subtrees. Match
+    # the whole sibling path case-insensitively, like the macOS kernel.
+    local staged_base="" staged_path staged_grant suffix grant
+    staged_path="$(printf '%s' "$path" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+    for grant in ${log_allowed_staged[@]+"${log_allowed_staged[@]}"}; do
+      staged_grant="$(printf '%s' "$grant" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+      if [[ "$staged_path" == "$staged_grant" ]]; then
+        staged_base="$grant"
+        break
+      elif [[ "$staged_path" == "$staged_grant.tmp."* ]]; then
+        suffix="${staged_path#"$staged_grant.tmp."}"
+        if [[ "$suffix" =~ ^[0-9a-f]{8}$ ]]; then
+          staged_base="$grant"
+          break
+        fi
+      fi
+    done
+    if [[ -n "$staged_base" ]]; then
+      cat_staged+=("${staged_base}${AUDIT_RECORD_SEPARATOR}${path}")
+      continue
+    fi
     # Prefer custom policy matches over default/platform matches.
     # Within each class, use the most specific (longest) matching parent.
     local matched_custom=""
@@ -3021,6 +3161,17 @@ audit_log() {
   echo ""
   echo "=== scode audit: ${#denied_paths[@]} unique denied path(s) ==="
   echo ""
+
+  if [[ ${#cat_staged[@]} -gt 0 ]]; then
+    echo "Covered by logged staged-file grants (sandbox or OS-level denials):"
+    for entry in "${cat_staged[@]}"; do
+      local base path
+      IFS="$AUDIT_RECORD_SEPARATOR" read -r base path <<< "$entry"
+      echo "  $path"
+      printf '  --allow-staged %q\n' "$base"
+    done
+    echo ""
+  fi
 
   if [[ ${#cat_default[@]} -gt 0 ]]; then
     echo "Blocked by scode defaults:"
@@ -3199,8 +3350,8 @@ macos_path_in_block() {
 # them. A different retained block still applies its own predicate; an allow
 # inside one block does not lift another block reached through a link.
 emit_macos_block_deny() {
-  local index="$1" project_dir="${2:-}" spelling dir
-  local -a exceptions=()
+  local index="$1" project_dir="${2:-}" spelling dir operation
+  local -a exceptions=() staged_exceptions=() operations=('file-read* file-write* process-exec')
   if [[ -n "$project_dir" ]] && macos_block_exempts_project "$index" "$project_dir"; then
     exceptions+=("$project_dir")
   fi
@@ -3212,24 +3363,46 @@ emit_macos_block_deny() {
   for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
     macos_path_in_block "$dir" "$index" && exceptions+=("$dir")
   done
+  for dir in ${ALL_ALLOWED_STAGED[@]+"${ALL_ALLOWED_STAGED[@]}"}; do
+    macos_block_spellings "$index"
+    for spelling in ${MACOS_BLOCK_SPELLINGS[@]+"${MACOS_BLOCK_SPELLINGS[@]}"}; do
+      if staged_grant_overlaps_block "$dir" "$spelling"; then
+        staged_exceptions+=("$dir")
+        break
+      fi
+    done
+  done
   macos_block_spellings "$1"
   [[ ${MACOS_BLOCK_SPELLINGS[0]+_} ]] || return 0
-  echo "(deny file-read* file-write* process-exec"
-  if [[ ${exceptions[0]+_} ]]; then
-    echo "  (require-all"
-    echo "    (require-any"
+  # Staged grants carve out data access only. Keep execution blocked even
+  # when the name matches a writable regular file or staging sibling.
+  if [[ ${staged_exceptions[0]+_} ]]; then
+    operations=('file-read* file-write*' process-exec)
   fi
-  for spelling in "${MACOS_BLOCK_SPELLINGS[@]}"; do
-    printf '  (subpath "%s")\n' "$(sbpl_escape "$spelling")"
-  done
-  if [[ ${exceptions[0]+_} ]]; then
-    echo "    )"
-    for dir in "${exceptions[@]}"; do
-      printf '    (require-not (subpath "%s"))\n' "$(sbpl_escape "$dir")"
+  for operation in "${operations[@]}"; do
+    echo "(deny $operation"
+    if [[ ${exceptions[0]+_} || ${staged_exceptions[0]+_} ]]; then
+      echo "  (require-all"
+      echo "    (require-any"
+    fi
+    for spelling in "${MACOS_BLOCK_SPELLINGS[@]}"; do
+      printf '  (subpath "%s")\n' "$(sbpl_escape "$spelling")"
     done
-    echo "  )"
-  fi
-  echo ")"
+    if [[ ${exceptions[0]+_} || ${staged_exceptions[0]+_} ]]; then
+      echo "    )"
+      for dir in ${exceptions[@]+"${exceptions[@]}"}; do
+        printf '    (require-not (subpath "%s"))\n' "$(sbpl_escape "$dir")"
+      done
+      if [[ "$operation" != process-exec ]]; then
+        for dir in ${staged_exceptions[@]+"${staged_exceptions[@]}"}; do
+          printf '    (require-not (require-all (vnode-type REGULAR-FILE) (require-any (literal "%s") (regex "%s"))))\n' \
+            "$(sbpl_escape "$dir")" "$(staged_path_regex "$dir")"
+        done
+      fi
+      echo "  )"
+    fi
+    echo ")"
+  done
 }
 
 # A built-in parent never revokes the selected project after its grant.
@@ -3490,49 +3663,6 @@ EOF
     done
   fi
 
-  # macOS ~/Library carve-outs: re-allow specific subdirs after the
-  # blanket ~/Library deny. In sandbox-exec, later rules override earlier ones.
-  if [[ "$PLATFORM" == "darwin" ]]; then
-    # Only emit carve-outs if ~/Library is actually blocked
-    local library_blocked=0
-    if [[ ${#blocked[@]} -gt 0 ]]; then
-      for dir in "${blocked[@]}"; do
-        [[ "$dir" == "$HOME/Library" ]] && library_blocked=1 && break
-      done
-    fi
-    if [[ "$library_blocked" -eq 1 && $(( ${#DARWIN_LIBRARY_ALLOWED_RW[@]} + ${#DARWIN_LIBRARY_ALLOWED_RO[@]} )) -gt 0 ]]; then
-      echo ""
-      echo "; ~/Library carve-outs (read-write)"
-      for dir in ${DARWIN_LIBRARY_ALLOWED_RW[@]+"${DARWIN_LIBRARY_ALLOWED_RW[@]}"}; do
-        if ! is_allowed "$dir"; then
-          local esc_dir
-          esc_dir="$(sbpl_escape "$dir")"
-          cat <<EOF
-(allow file-read* file-write* process-exec
-  (subpath "${esc_dir}")
-)
-EOF
-          grants+=("$dir")
-        fi
-      done
-      echo ""
-      echo "; ~/Library carve-outs (read-only)"
-      for dir in ${DARWIN_LIBRARY_ALLOWED_RO[@]+"${DARWIN_LIBRARY_ALLOWED_RO[@]}"}; do
-        if ! is_allowed "$dir"; then
-          local esc_dir
-          esc_dir="$(sbpl_escape "$dir")"
-          cat <<EOF
-(allow file-read* process-exec
-  (subpath "${esc_dir}")
-)
-EOF
-          grants+=("$dir")
-        fi
-      done
-      emit_macos_redeny_inside "$project_dir" ${grants[@]+"${grants[@]}"}
-    fi
-  fi
-
   # Project directory override: if the project dir falls under a blocked
   # parent (e.g. ~/Documents/myproject), re-allow it here. In sandbox-exec,
   # later rules override earlier ones. Skip if no blocked dirs exist.
@@ -3640,6 +3770,7 @@ emit_strict_ancestor_metadata() {
   seeds=("$project_dir")
   [[ -n "${SAFE_DARWIN_TMPDIR:-}" ]] && seeds+=("${SAFE_DARWIN_TMPDIR}")
   seeds+=(${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"})
+  seeds+=(${ALL_ALLOWED_STAGED[@]+"${ALL_ALLOWED_STAGED[@]}"})
   seeds+=(${HARNESS_STRICT_RO[@]+"${HARNESS_STRICT_RO[@]}"})
   [[ -n "${HOME:-}" ]] && seeds+=("${HOME}")
 
@@ -4758,8 +4889,9 @@ esac
 DRY_RUN=0
 STRICT=0
 SCRUB_ENV=0
+LOGIN_STORE=0
+NO_LOGIN_STORE=0
 GROK_DEFENSE=0
-CREDENTIAL_SYNC=1
 LOG_FILE=""
 PROJECT_DIR=""
 
@@ -4767,11 +4899,13 @@ COMMAND=()
 CLI_BLOCKED=()
 CLI_ALLOWED=()
 CLI_ALLOWED_RO=()
+CLI_ALLOWED_STAGED=()
 # Env var names exempt from --scrub-env via --keep-env (exact names, deduped).
 KEEP_ENV_NAMES=()
 CONFIG_BLOCKED=()
 CONFIG_ALLOWED=()
 CONFIG_ALLOWED_RO=()
+CONFIG_ALLOWED_STAGED=()
 # String configs init to "" (unset means "use default"); boolean configs also
 # init to "" so explicit false can be distinguished from "not configured".
 # parse_config() sets these via eval with a CONFIG_ prefix.
@@ -4779,6 +4913,8 @@ CONFIG_NET=""
 CONFIG_FS_MODE=""
 CONFIG_STRICT=""
 CONFIG_SCRUB_ENV=""
+CONFIG_LOGIN_STORE=""
+CONFIG_NO_LOGIN_STORE=""
 CONFIG_GROK_DEFENSE=""
 
 # Track CLI-explicit flags (so config doesn't override them)
@@ -4865,7 +5001,15 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --no-credential-sync)
-      CREDENTIAL_SYNC=0
+      # Compatibility no-op for 0.6.8; callers may still pass this flag.
+      shift
+      ;;
+    --login-store)
+      LOGIN_STORE=1
+      shift
+      ;;
+    --no-login-store)
+      NO_LOGIN_STORE=1
       shift
       ;;
     --scrub-env)
@@ -4913,7 +5057,7 @@ while [[ $# -gt 0 ]]; do
       CLI_BLOCKED+=("$2")
       shift 2
       ;;
-    --allow|--allow-ro)
+    --allow|--allow-ro|--allow-staged)
       if [[ $# -lt 2 ]]; then
         error "missing argument for $1"
         exit 1
@@ -4921,6 +5065,8 @@ while [[ $# -gt 0 ]]; do
       validate_path "$2"
       if [[ "$1" == --allow-ro ]]; then
         CLI_ALLOWED_RO+=("$2")
+      elif [[ "$1" == --allow-staged ]]; then
+        CLI_ALLOWED_STAGED+=("$2")
       else
         CLI_ALLOWED+=("$2")
       fi
@@ -5162,322 +5308,6 @@ else
   warning "'${COMMAND[0]}' is not a known harness — sandbox behavior has not been tested for this command"
 fi
 
-# Credential handling remains excluded from kcov measurement on both platforms.
-# test/10_credential_sync.bats covers guarded skips; controlled macOS Keychain
-# verification is documented in docs/releases.md.
-# SCODE_COVERAGE_EXCLUDE_START
-# Claude Code keeps its credential in the macOS Keychain, which the sandbox
-# blocks along with the rest of ~/Library, so a sandboxed claude reports
-# "Not logged in" against a perfectly valid session. It also reads a file store
-# at ~/.claude/.credentials.json, inside the directory the harness auto-allow
-# already covers.
-#
-# Copying the credential there by hand does not hold: a token refresh migrates
-# it back to the Keychain and deletes the file. So the copy is made here, in the
-# parent process, which is still outside the sandbox and can read the Keychain.
-#
-# Successful synchronization writes only the access token from the Keychain.
-# File-only macOS logins and Linux are outside this synchronization contract.
-# A sandboxed claude authenticates for the access token's lifetime (hours) and
-# fails with a plain 401 when it expires or is revoked -- it cannot refresh.
-# That restriction is the point: a copy that could refresh would rotate the
-# grant the operator's interactive Claude Code holds, and a stale copy
-# presenting the superseded refresh token makes the provider revoke the whole
-# grant family, logging the operator out of every Claude session (which is
-# what happened on 2026-10-05 when the copy still carried it). The access
-# token remains a bearer credential readable by sandboxed programs.
-# --no-credential-sync declines copying, not existing authentication.
-# Whether the Claude credential file at $1 holds a refresh token (read
-# through any symlink; a non-file or unreadable path counts as "no").
-claude_file_holds_refresh_token() {
-  [[ -f "$1" ]] || return 1
-  /usr/bin/python3 -c '
-import json, sys
-try:
-    with open(sys.argv[1]) as handle:
-        oauth = (json.load(handle).get("claudeAiOauth") or {})
-except (OSError, ValueError, AttributeError):
-    raise SystemExit(1)
-raise SystemExit(0 if isinstance(oauth, dict) and oauth.get("refreshToken") else 1)
-' "$1" 2>/dev/null
-}
-
-# Whether a Claude Code Keychain item exists at all (the secret is not read:
-# exit 44 is "not found", anything else means an item is there). With no
-# item the credential file is Claude Code's only store and a refresh token
-# in it is normal; with one, the file is a mirror and that token is the
-# second copy that revokes logins.
-claude_keychain_item_exists() {
-  local _status=0
-  security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1 || _status=$?
-  [[ "$_status" -ne 44 ]]
-}
-
-# The one rule that holds on every path where the sandboxed claude could read
-# ~/.claude: with a Keychain item present, a refresh token in the credential
-# file is not launched through. $1 says why the copy itself is not happening.
-refuse_claude_refresh_token_if_mirrored() {
-  claude_file_holds_refresh_token "$HOME/.claude/.credentials.json" || return 0
-  claude_keychain_item_exists || return 0
-  refuse_claude_refresh_token "$1"
-}
-
-refuse_claude_refresh_token() {
-  error "$HOME/.claude/.credentials.json holds a Claude refresh token and scode is not syncing it ($1); refusing to launch a sandboxed claude with it (a child holding that token could revoke your Claude login). Empty the refreshToken value in that file, or let scode sync it, and retry."
-  exit 1
-}
-
-sync_claude_credential() {
-  [[ "$PLATFORM" == "darwin" ]] || return 0
-  [[ "$DETECTED_HARNESS" == "claude" ]] || return 0
-  command -v security >/dev/null 2>&1 || return 0
-
-  # Only write the credential where a sandboxed process could actually use it.
-  # Everywhere else the copy would only move the access token into a file the
-  # sandbox cannot reach, for nothing.
-  #
-  # --dry-run promises to inspect without acting. Blocking ~/.claude is a
-  # direct instruction to keep the credential away from this run, which
-  # writing it there first would contradict -- and where the sandbox cannot
-  # read the file, no refusal applies either, so reachability is settled
-  # first.
-  [[ "$DRY_RUN" -eq 1 ]] && return 0
-  local _explicitly_allowed=0
-  local _allowed_path
-  for _allowed_path in ${ALL_ALLOWED[@]+"${ALL_ALLOWED[@]}"}; do
-    case "$HOME/.claude/" in
-      "$_allowed_path"/*|"$_allowed_path") _explicitly_allowed=1; break ;;
-    esac
-  done
-
-  # Both the directory and the credential file itself, since blocking just the
-  # file is a direct instruction not to expose it.
-  if [[ "$_explicitly_allowed" -eq 0 ]]; then
-    if is_allowed_in_list "$HOME/.claude/.credentials.json" \
-         "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
-         "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
-         "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
-      return 0
-    fi
-    if is_allowed_in_list "$HOME/.claude" \
-         "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
-         "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
-         "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
-      return 0
-    fi
-  fi
-
-  # Declared separately: within one `local`, $dir is not yet assigned when a
-  # later name on the same line expands it, which trips set -u.
-  # --trust untrusted drops the auto-allow. Explicit grants or project selection
-  # can still expose ~/.claude. This guard checks explicit grants only,
-  # in which case nothing is copied but the one rule still applies.
-  if [[ "$CLI_TRUST" == "untrusted" ]]; then
-    [[ "$_explicitly_allowed" -eq 1 ]] && refuse_claude_refresh_token_if_mirrored "--trust untrusted declines the copy"
-    return 0
-  fi
-  # Entry scripts are detected for their state directories, but credential
-  # sync requires the harness launcher binary because a script's interpreter
-  # comes from the caller's PATH. Wrappers can also change PATH before
-  # choosing the harness binary:
-  # `env PATH=$PWD:$PATH claude` resolves to /usr/bin/env but can run a
-  # repository-controlled claude with the token in reach.
-  if [[ "${COMMAND_BINARY_PATH##*/}" != "$DETECTED_HARNESS" &&
-        "${COMMAND_BINARY_PATH##*/}" != "$DETECTED_HARNESS.exe" ]]; then
-    refuse_claude_refresh_token_if_mirrored "'${COMMAND[0]}' does not resolve directly to the harness launcher binary; entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH"
-    warning "not syncing the Claude credential: '${COMMAND[0]}' does not resolve directly to the harness launcher binary; entry scripts are detected for their state directories, but credential sync requires the harness launcher binary because a script's interpreter comes from the caller's PATH"
-    return 0
-  fi
-
-  # A binary inside the project is not the installed harness. A repository can
-  # ship its own ./claude, or a node_modules/.bin/claude, and PATH may well find
-  # it first; copying the real OAuth token for that is handing a credential to
-  # whatever the project chose to call itself. The harness auto-allow tolerates
-  # a basename match because it only opens a directory; this writes a secret.
-  local resolved="${COMMAND_BINARY_PATH:-}"
-  if [[ -n "$resolved" && -n "${PROJECT_DIR:-}" ]]; then
-    case "$(cd "$(dirname "$resolved")" 2>/dev/null && pwd -P)/" in
-      "$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)"/*)
-        refuse_claude_refresh_token_if_mirrored "'${resolved}' lives inside the project"
-        warning "not syncing the Claude credential: '${resolved}' lives inside the project"
-        return 0
-        ;;
-    esac
-  fi
-
-  # An explicit --allow re-opens a blocked path, so a block alone does not mean
-  # the sandbox cannot reach the credential; consult the effective policy first.
-  local dir="$HOME/.claude"
-  local target="$dir/.credentials.json"
-  local tmp=""
-  [[ -d "$dir" ]] || return 0
-
-  # The opt-out declines the copy, not the one rule — and only matters here,
-  # past the guards above, where the sandbox can actually read the file.
-  if [[ "$CREDENTIAL_SYNC" -ne 1 ]]; then
-    refuse_claude_refresh_token_if_mirrored "--no-credential-sync is set"
-    return 0
-  fi
-
-
-  # Resolve where the write would actually land. HOME can be redirected and
-  # ~/.claude can be a symlink, either of which would put the real refresh
-  # token inside the repository being reviewed.
-  local real_dir
-  real_dir="$(cd "$dir" 2>/dev/null && pwd -P)" || return 0
-  if [[ -n "${PROJECT_DIR:-}" ]]; then
-    local real_project
-    real_project="$(cd "$PROJECT_DIR" 2>/dev/null && pwd -P)" || real_project=""
-    if [[ -n "$real_project" ]]; then
-      case "$real_dir/" in
-        "$real_project"/*)
-          refuse_claude_refresh_token_if_mirrored "${real_dir} is inside the project"
-          warning "not syncing the Claude credential: ${real_dir} is inside the project"
-          return 0
-          ;;
-      esac
-    fi
-  fi
-
-  # Synchronization never writes through a symlinked ~/.claude or credential
-  # file. Refusal checks can read through it. A
-  # rewrite would turn whatever file the link reaches into one the sandbox
-  # can read. Nothing is synced then; a refresh token behind the link is the
-  # usual refusal when a Keychain item exists.
-  if [[ -L "$dir" || -L "$target" || ( -e "$target" && ! -f "$target" ) ]]; then
-    refuse_claude_refresh_token_if_mirrored "${target} or ${dir} is a symbolic link"
-    warning "not syncing the Claude credential: ${target} or ${dir} is a symbolic link"
-    return 0
-  fi
-
-  # Exit 44 (errSecItemNotFound) means no Keychain entry at all: then the
-  # file is not a mirror but Claude Code's one and only credential store,
-  # its refresh token the operator's only copy, and the sandboxed claude is
-  # the same Claude Code rotating that same file -- one copy, no divergence,
-  # nothing to scrub. It is left exactly as it is. Any other failure (locked
-  # keychain, denied ACL, timeout) means an entry exists and the file is a
-  # mirror, so a refresh token in it must still go.
-  local secret security_status=0
-  secret="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)" || security_status=$?
-  if [[ "$security_status" -eq 44 ]]; then
-    return 0
-  fi
-
-  local holds_refresh=0
-  claude_file_holds_refresh_token "$target" && holds_refresh=1
-
-  # A Keychain entry exists but could not be read (locked keychain, denied
-  # ACL, timeout) or came back empty. Nothing can be mirrored, and nothing is
-  # destroyed either: the file's refresh token might be the only working
-  # login (an old sandbox rotation could have left the Keychain's copy dead),
-  # so it is not emptied blind. A file that carries one is not launched
-  # through; a file without one launches and will report its own 401 if stale.
-  if [[ "$security_status" -ne 0 || -z "$secret" ]]; then
-    [[ "$holds_refresh" -eq 1 ]] && refuse_claude_refresh_token "the Keychain cannot be read (status ${security_status}); unlock it"
-    return 0
-  fi
-
-  # What the file may hold. With a usable Keychain access token: that token
-  # and the fields beside it, refresh token emptied, merged over the file's
-  # other top-level fields (Claude Code co-stores mcpOAuth state there). With
-  # a Keychain entry that holds nothing usable (co-stored state only, or an
-  # access token already expired): the file's own credential with only the
-  # refresh token removed — the Keychain owns the login, so the file is a
-  # mirror and the token in it is the second copy. Built outside the sandbox
-  # by the system interpreter, which is fed the secret on stdin.
-  local mirror mirror_status=0
-  mirror="$(printf '%s' "$secret" | /usr/bin/python3 -c '
-import json, sys, time
-secret = json.load(sys.stdin)
-keychain = secret.get("claudeAiOauth") if isinstance(secret, dict) else None
-if not isinstance(keychain, dict):
-    keychain = {}
-access = keychain.get("accessToken")
-expires = keychain.get("expiresAt")
-usable = isinstance(access, str) and access != "" and not (
-    isinstance(expires, (int, float)) and expires <= time.time() * 1000)
-current = {}
-try:
-    with open(sys.argv[1]) as handle:
-        loaded = json.load(handle)
-    if isinstance(loaded, dict):
-        current = loaded
-except (OSError, ValueError):
-    pass
-own = current.get("claudeAiOauth")
-if not isinstance(own, dict):
-    own = {}
-if usable:
-    oauth = {k: keychain[k] for k in ("accessToken", "expiresAt", "scopes", "subscriptionType", "rateLimitTier") if k in keychain}
-    oauth["refreshToken"] = ""
-elif own.get("refreshToken"):
-    oauth = dict(own)
-    oauth.pop("refreshTokenExpiresAt", None)
-    oauth["refreshToken"] = ""
-    if not oauth.get("accessToken"):
-        oauth["accessToken"] = ""
-        if not isinstance(oauth.get("expiresAt"), (int, float)): oauth["expiresAt"] = 0
-        if not isinstance(oauth.get("scopes"), list): oauth["scopes"] = []
-else:
-    raise SystemExit(3)  # nothing to mirror and nothing to scrub
-if own.get("accessToken") == oauth.get("accessToken") and not own.get("refreshToken") and own.get("refreshToken", None) is not None:
-    raise SystemExit(3)  # already exactly what the child may hold
-current["claudeAiOauth"] = oauth
-print(json.dumps(current))
-' "$target" 2>/dev/null)" || mirror_status=$?
-  if [[ "$mirror_status" -eq 3 || ( "$mirror_status" -eq 0 && -z "$mirror" ) ]]; then
-    return 0
-  fi
-  if [[ "$mirror_status" -ne 0 ]]; then
-    [[ "$holds_refresh" -eq 1 ]] && refuse_claude_refresh_token "the credential could not be prepared"
-    return 0
-  fi
-
-  # A file that still carries a refresh token is backed up before it is
-  # replaced: that token may be the operator's only working login, and scode
-  # never destroys a credential it cannot prove superseded. The copy goes
-  # under ~/Library, which this sandbox blocks wholesale, never beside the
-  # file (the child reads that directory): directory 0700, file 0600.
-  local backup=""
-  if [[ "$holds_refresh" -eq 1 ]]; then
-    local backup_dir="$HOME/Library/Application Support/scode/credential-backups"
-    if mkdir -p "$backup_dir" 2>/dev/null && chmod 700 "$backup_dir" 2>/dev/null; then
-      backup="$(mktemp "$backup_dir/credentials.XXXXXX" 2>/dev/null)" || backup=""
-    fi
-    if [[ -z "$backup" ]] || ! { chmod 600 "$backup" 2>/dev/null && cat "$target" > "$backup" 2>/dev/null; }; then
-      [[ -n "$backup" ]] && rm -f "$backup" 2>/dev/null
-      refuse_claude_refresh_token "it could not be backed up before scrubbing"
-    fi
-  fi
-
-  # Written under a random name and renamed, so a concurrent reader sees either
-  # the old credential or the new one, never a partial file. When the write
-  # fails and the file still holds a refresh token, the launch is refused —
-  # the child would otherwise start with that token; the backup just made is
-  # removed again, the file being unchanged.
-  tmp="$(mktemp "$dir/.credentials.XXXXXX" 2>/dev/null)" || tmp=""
-  if [[ -n "$tmp" ]] && chmod 600 "$tmp" 2>/dev/null && printf '%s\n' "$mirror" > "$tmp" 2>/dev/null && mv -f "$tmp" "$target" 2>/dev/null; then
-    if [[ -n "$backup" ]]; then
-      # Only the newest copy is kept once its rewrite has succeeded: each one
-      # holds a whole grant. Older files are pruned, never a newer one (a
-      # parallel launch may have written it and may still need it).
-      local _older
-      for _older in "$(dirname "$backup")"/credentials.*; do
-        [[ -f "$_older" && "$_older" != "$backup" && "$_older" -ot "$backup" ]] && rm -f "$_older" 2>/dev/null
-      done
-      warning "the Claude credential file held a refresh token; a copy was kept at ${backup} (0600, outside the sandbox) and the file was rewritten without it"
-    fi
-    return 0
-  fi
-  [[ -n "$tmp" ]] && rm -f "$tmp" 2>/dev/null
-  if [[ "$holds_refresh" -eq 1 ]]; then
-    [[ -n "$backup" ]] && rm -f "$backup" 2>/dev/null
-    refuse_claude_refresh_token "${target} could not be rewritten"
-  fi
-  warning "could not write ${target}; sandboxed claude will not be able to authenticate"
-}
-# SCODE_COVERAGE_EXCLUDE_END
-
 # -------- Resolve config file --------
 
 # Priority: --config flag > SCODE_CONFIG env var > default path
@@ -5505,10 +5335,13 @@ PROJECT_CONFIG_FILE="${PROJECT_DIR%/}/.scode.yaml"
 PROJECT_BLOCKED=()
 PROJECT_ALLOWED=()
 PROJECT_ALLOWED_RO=()
+PROJECT_ALLOWED_STAGED=()
 PROJECT_NET=""
 PROJECT_FS_MODE=""
 PROJECT_STRICT=""
 PROJECT_SCRUB_ENV=""
+PROJECT_LOGIN_STORE=""
+PROJECT_NO_LOGIN_STORE=""
 PROJECT_GROK_DEFENSE=""
 if [[ -L "${PROJECT_CONFIG_FILE}" ]]; then
   error "refusing symbolic-link project config: ${PROJECT_CONFIG_FILE}"
@@ -5698,8 +5531,72 @@ _check_project_config_weakens() {
   if [[ "$PROJECT_GROK_DEFENSE" == "0" && "${CONFIG_GROK_DEFENSE:-}" != "0" ]]; then
     warning "ignoring permissive project config value: grok_defense: false"
   fi
+  if [[ "$PROJECT_LOGIN_STORE" == 1 ]]; then
+    warning "ignoring project config login_store: true (only CLI or user config can enable it)"
+  fi
 }
 _check_project_config_weakens
+
+# Explicit staged-file authority follows --allow precedence. It never adds
+# automatic harness grants, including under the untrusted preset.
+ALL_ALLOWED_STAGED=()
+for _source in CLI CONFIG; do
+  _staged_paths=()
+  if [[ "$_source" == CLI ]]; then
+    _staged_paths=(${CLI_ALLOWED_STAGED[@]+"${CLI_ALLOWED_STAGED[@]}"})
+  else
+    _staged_paths=(${CONFIG_ALLOWED_STAGED[@]+"${CONFIG_ALLOWED_STAGED[@]}"})
+  fi
+  for dir in ${_staged_paths[@]+"${_staged_paths[@]}"}; do
+    if [[ "$PLATFORM" != darwin ]]; then
+      error "--allow-staged / allowed_staged is macOS-only: Linux bind mounts cannot restrict future staging filenames"
+      exit 1
+    fi
+    # Resolve ancestors but inspect the base before following a final symlink.
+    # Atomic writers replace the link spelling, not its target.
+    _staged_spelling="$dir"
+    if [[ "$_staged_spelling" =~ ^~(/|$) ]]; then
+      _staged_spelling="${HOME}${_staged_spelling:1}"
+    elif [[ "$_staged_spelling" != /* ]]; then
+      _staged_spelling="${PROJECT_DIR}/${_staged_spelling}"
+    fi
+    # A trailing slash would hide a final symlink from the -L test.
+    while [[ "$_staged_spelling" == */ && "$_staged_spelling" != / ]]; do
+      _staged_spelling="${_staged_spelling%/}"
+    done
+    if [[ -L "$_staged_spelling" ]]; then
+      error "--allow-staged / allowed_staged refuses a symlinked base file: ${dir}; use a regular base file"
+      exit 1
+    fi
+    _staged="$(resolve_access_path "$dir" "$PROJECT_DIR")"
+    validate_path "$_staged"
+    if [[ -e "$_staged" && ! -f "$_staged" ]]; then
+      error "staged allowed path must be a file: ${_staged}"
+      exit 1
+    fi
+    _staged_conflict=0
+    if [[ "$_source" == CONFIG ]]; then
+      for _block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}; do
+        if staged_grant_overlaps_block "$_staged" "$_block"; then
+          _staged_conflict=1
+          break
+        fi
+      done
+    fi
+    [[ "$_staged_conflict" -eq 1 ]] && continue
+    for _block in ${GROK_MANDATORY_BLOCKED[@]+"${GROK_MANDATORY_BLOCKED[@]}"}; do
+      if staged_grant_overlaps_block "$_staged" "$_block"; then
+        error "grok_defense conflicts with staged allowed path: ${_staged}"
+        exit 1
+      fi
+    done
+    ALL_ALLOWED_STAGED+=("$_staged")
+  done
+done
+for dir in ${PROJECT_ALLOWED_STAGED[@]+"${PROJECT_ALLOWED_STAGED[@]}"}; do
+  resolve_access_path "$dir" "$PROJECT_DIR" >/dev/null
+  warning "ignoring project config allowed_staged path (project config is restrictive-only): ${dir}"
+done
 
 # Read-only authority is separate: it must never remove a write block.
 ALL_ALLOWED_RO=()
@@ -5737,7 +5634,7 @@ for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
   done
 done
 
-# Build authoritative allowed list (CLI + user config only).
+# Build allowed paths with their authority sources.
 ALL_ALLOWED=()
 ALL_ALLOWED_SOURCES=()
 for dir in ${RESOLVED_CLI_ALLOWED[@]+"${RESOLVED_CLI_ALLOWED[@]}"}; do
@@ -5764,10 +5661,75 @@ fi
 # HARNESS_STRICT_RO is a legacy name; both builders grant read-write access.
 # The untrusted preset disables these automatic grants.
 HARNESS_STRICT_RO=()
+_auto_allowed=()
+
+# Let Keychain-backed harnesses use their own login store. Only construct
+# filesystem grants here: never inspect credentials or invoke a login tool.
+[[ "$CONFIG_LOGIN_STORE" == 1 ]] && LOGIN_STORE=1
+if [[ "$CONFIG_NO_LOGIN_STORE" == 1 || "$PROJECT_NO_LOGIN_STORE" == 1 ]]; then
+  NO_LOGIN_STORE=1
+fi
+if [[ "$PLATFORM" == "darwin" ]]; then
+  case "${DETECTED_HARNESS:-}" in
+    claude|agy)
+      _login_declined=""
+      if [[ "$NO_LOGIN_STORE" == 1 ]]; then
+        _login_declined="--no-login-store or no_login_store: true is set"
+      elif [[ "$LOGIN_STORE" != 1 ]]; then
+        _login_declined="login-store access is off by default"
+      elif [[ "$CLI_TRUST" == untrusted ]]; then
+        _login_declined="--trust untrusted disables automatic grants"
+      elif [[ "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS" &&
+              "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS.exe" ]]; then
+        _login_declined="the invoked name is not the harness launcher (entry scripts and wrappers are ineligible)"
+      elif [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
+        _login_declined="the harness target is not a regular executable"
+      elif [[ "$(dd if="$COMMAND_BINARY_PATH" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" == 2321 ]]; then
+        _login_declined="the resolved harness target is an interpreter entry script (entry scripts and wrappers are ineligible)"
+      elif is_same_or_descendant_path "$COMMAND_BINARY_PATH" "$PROJECT_DIR"; then
+        _login_declined="the resolved harness executable is inside the project"
+      fi
+      _login_keychains="$HOME/Library/Keychains"
+      _login_preferences="$HOME/Library/Preferences/com.apple.security.plist"
+      _login_paths=("$_login_keychains" "$_login_preferences")
+      if [[ -z "$_login_declined" ]]; then
+        for _login_path in "${_login_paths[@]}"; do
+          dir="$(_realpath "$_login_path")"
+          # A redirected store must not expose a different Library subtree.
+          if [[ "$dir" != "$_login_path" ]]; then
+            _login_declined="path is redirected: ${_login_path}"
+            break
+          fi
+          for _block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"} \
+              ${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"} \
+              ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
+            if paths_overlap_hierarchy "$dir" "$_block"; then
+              _login_declined="overlaps block ${_block}"
+              break
+            fi
+          done
+          [[ -n "$_login_declined" ]] && break
+        done
+      fi
+      if [[ -n "$_login_declined" ]]; then
+        info "${DETECTED_HARNESS}: no automatic login-store grant: ${_login_declined}; without explicit path grants, the sandbox does not reach the macOS Keychain, so a Keychain login is not available inside it; --login-store (or user login_store: true) grants ${_login_keychains} read-write and ${_login_preferences} read-only when present, subject to eligibility and blocks; see docs/security.md for what that exposes"
+      else
+        ALL_ALLOWED+=("$_login_keychains")
+        ALL_ALLOWED_SOURCES+=("auto")
+        # One regular file only: a directory or link here would turn the
+        # read-only grant into a recursive or redirected one.
+        if [[ -f "$_login_preferences" && ! -L "$_login_preferences" ]]; then
+          ALL_ALLOWED_RO+=("$_login_preferences")
+        fi
+        info "${DETECTED_HARNESS}: allowing login store: ${_login_keychains} (read-write); ${_login_preferences} (read-only when present); see docs/security.md for what that exposes"
+      fi
+      ;;
+  esac
+fi
+
 if [[ "${STRICT}" -eq 1 && "$CLI_TRUST" != "untrusted" ]]; then
   _detected_harness="${DETECTED_HARNESS:-}"
   if [[ -n "${_detected_harness}" ]]; then
-    _auto_allowed=()
     if get_harness_config_paths "$_detected_harness"; then
       for _harness_config_path in "${HARNESS_CONFIG_PATHS[@]}"; do
         _harness_config_path="$(_realpath "$_harness_config_path")"
@@ -5785,29 +5747,7 @@ if [[ "${STRICT}" -eq 1 && "$CLI_TRUST" != "untrusted" ]]; then
         fi
       done
     fi
-    # Reserved for narrowly scoped platform-specific auto-allows. The current
-    # macOS policy deliberately leaves these lists empty.
-    if [[ "$PLATFORM" == "darwin" ]]; then
-      for dir in ${DARWIN_LIBRARY_ALLOWED_RW[@]+"${DARWIN_LIBRARY_ALLOWED_RW[@]}"}; do
-        if ! is_allowed_in_list "$dir" \
-             "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
-             "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
-             "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
-          ALL_ALLOWED+=("$dir")
-          ALL_ALLOWED_SOURCES+=("auto")
-          _auto_allowed+=("$dir")
-        fi
-      done
-      for dir in ${DARWIN_LIBRARY_ALLOWED_RO[@]+"${DARWIN_LIBRARY_ALLOWED_RO[@]}"}; do
-        if ! is_allowed_in_list "$dir" \
-             "${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"}" \
-             "${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"}" \
-             "${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}"; then
-          HARNESS_STRICT_RO+=("$dir")
-          _auto_allowed+=("$dir")
-        fi
-      done
-    fi
+
     if [[ ${#_auto_allowed[@]} -gt 0 ]]; then
       info "strict+${_detected_harness}: auto-allowing ${_auto_allowed[*]}"
     fi
@@ -6308,6 +6248,9 @@ if [[ "$PLATFORM" == "darwin" ]]; then
     PROFILE=$(generate_profile "${PROJECT_DIR}" "${FS_MODE}" "${NET_MODE}" ${ALL_BLOCKED[@]+"${ALL_BLOCKED[@]}"})
   fi
 
+  PROFILE="${PROFILE}
+$(emit_macos_staged_grants)"
+
   # Read-only exceptions follow writable grants, then restore nested blocks.
   for dir in ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[@]}"}; do
     _esc_ro="$(sbpl_escape "$dir")"
@@ -6395,10 +6338,6 @@ ${_identity_profile}"
 
   # Set working directory (sandbox-exec has no --chdir equivalent)
   cd "${PROJECT_DIR}" || { error "cannot cd to project directory: ${PROJECT_DIR}"; exit 1; }
-
-  # Resolved policy is known by now, so the sync can tell whether the sandbox
-  # this run builds could actually reach the credential.
-  sync_claude_credential
 
   # Run sandboxed. The profile travels as a string (-p) rather than a temp
   # file, so teardown never races a profile cleanup; the main shell stays

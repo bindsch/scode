@@ -55,6 +55,9 @@ scode --scrub-env --keep-env KIMI_MODEL_API_KEY,ZAI_API_KEY kimi
 Names must match `[A-Za-z_][A-Za-z0-9_]*`. Empty entries, whitespace,
 assignments, and patterns fail. Repeated names are deduplicated.
 The parser does not classify credential names: `--keep-env PATH` is valid.
+Retained variables preserve empty values. For example,
+`CLAUDE_SECURESTORAGE_CONFIG_DIR=` remains set to the empty string under
+`--scrub-env`, including when named explicitly with `--keep-env`.
 Without scrubbing, exemptions warn and have no effect. Dry-run shows names,
 never values.
 
