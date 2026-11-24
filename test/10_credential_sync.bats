@@ -78,6 +78,10 @@ load login_store_helper
         [[ "$info_line" == *"$HOME/Library/Keychains"* ]]
         [[ "$info_line" == *"$HOME/Library/Preferences/com.apple.security.plist"* ]]
         [[ "$output" == *"(allow mach-lookup)"* ]]
+        # The blanket allow is narrowed only when the grant is not applied.
+        [[ "$output" != *"(deny mach-lookup"* ]]
+        run_profile --strict -- "$harness"
+        [[ "$output" == *"(allow mach-lookup)"*"(deny mach-lookup"*"(global-name \"com.apple.SecurityServer\")"* ]]
         [[ "$output" == *"(allow process-exec)"* ]]
         [[ "$output" == *'(subpath "/usr")'* ]]
       else

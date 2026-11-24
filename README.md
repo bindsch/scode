@@ -1,6 +1,6 @@
 # scode
 
-> **Beta software (v0.6.8).** Defaults and compatibility may change.
+> **Beta software (v0.6.9).** Defaults and compatibility may change.
 
 scode runs commands inside an OS sandbox on macOS or Linux. It uses a shared
 policy for coding tools without a daemon or container service.
@@ -51,7 +51,13 @@ Use `--no-login-store` (user config: `no_login_store: true`), an overlapping
 Project config cannot enable it; project `no_login_store: true` can suppress it.
 Without access, the harness cannot use a Keychain login. A sandboxed `claude` on
 macOS falls back to `~/.claude/.credentials.json` if one exists and is accessible;
-scode does not inspect that file. Explicit `--allow` retains its authority.
+scode does not inspect that file. Explicit `--allow` retains its file authority.
+Unless the grant is applied and `~/Library/Keychains/login.keychain-db` exists
+under the sandbox HOME, every macOS profile ends with a deny of Mach lookups for
+the keychain and authorization daemons (`com.apple.SecurityServer`,
+`com.apple.securityd.xpc`, `com.apple.authd`, and the security agent names). Keychain calls from the sandbox
+then fail with an error and no dialog, for every command and mode; an `--allow`
+of the Keychains directory does not change that.
 See [security](docs/security.md) for the exposure and precedence.
 scode never reads, copies, changes, or checks a harness login; each harness uses
 one login store, so scode cannot create a stale refresh-token copy.

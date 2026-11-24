@@ -7,6 +7,52 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.9] - 2026-11-24
+
+### Security
+
+- macOS: a sandboxed process can no longer cause a keychain or authorization
+  dialog through its own calls unless keychain access was granted. Work it
+  hands to a process outside the sandbox is not covered (see "Limits" in
+  `docs/security.md`). Until now the keychain was
+  protected by file rules only, and `com.apple.SecurityServer` and
+  `com.apple.authd` stayed reachable. A store from a sandbox that could not see
+  `~/Library/Keychains` made macOS show "A keychain cannot be found to store ...".
+  One launcher decision now yields both the login-store file grant and a final
+  `(deny mach-lookup ...)` rule for `com.apple.SecurityServer`,
+  `com.apple.securityd.xpc`, `com.apple.authd`, `com.apple.security.agent`,
+  `com.apple.security.agent.login`, and `com.apple.security.authhost`. The deny
+  is emitted for every command in normal and strict modes unless the
+  `--login-store` grant is applied and `~/Library/Keychains/login.keychain-db`
+  exists under the sandbox HOME.
+
+### Changed
+
+- The login-store grant is declined, with a reason, when
+  `~/Library/Keychains/login.keychain-db` does not exist as a regular file inside
+  that directory after links are resolved. This includes a private HOME with no
+  login keychain. Previously the directory was granted anyway.
+- The grant is also declined when `com.apple.security.plist` records a default
+  keychain that is outside `~/Library/Keychains` or does not exist. The same
+  holds for a recorded login keychain, and for a preference file that cannot
+  be read.
+- Without the applied grant, keychain and authorization calls from the sandbox
+  fail with an error and no dialog: `security` subcommands, keyring libraries,
+  `git-credential-osxkeychain`, keychain-held signing identities and client
+  certificates. TLS trust evaluation goes through `com.apple.trustd` and still
+  works for the clients checked (see `docs/security.md`).
+- `--allow "$HOME/Library/Keychains"` without the login-store grant still grants
+  the files but no longer leaves the keychain services reachable. Use
+  `--login-store` with an eligible `claude` or `agy` launch for keychain access.
+- Linux behavior is unchanged.
+
+### Fixed
+
+- `--log`: a signal that ended scode right after the log writer was started
+  could leave that writer waiting forever in its pipe open, holding the
+  caller's output descriptors. scode now opens the pipe first, so the writer's
+  open never waits and the writer exits as soon as scode is gone.
+
 ## [0.6.8] - 2026-11-16
 
 ### Added

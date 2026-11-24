@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.8"
+readonly PROGRAM_VERSION="0.6.9"
 readonly DARWIN_STRICT_SYSTEM_PATHS=(/usr /opt /System /Library /private/var/db
   /private/var/run /private/var/select /private/etc /dev /bin /sbin /etc)
 readonly LINUX_SYSTEM_PATHS=(/usr /opt /lib /lib64 /bin /sbin /etc)
@@ -748,7 +748,8 @@ Options:
                       Compatibility no-op for 0.6.8. scode never reads,
                       copies, changes, or checks a harness login.
   --login-store       Opt in to macOS claude/agy login-store access (default: off)
-  --no-login-store    Suppress login-store grants; wins over --login-store
+  --no-login-store    Suppress login-store grants; wins over --login-store.
+                      Without an applied grant, keychain services are denied
   --log FILE          Replace FILE with stderr capture (creates parent dirs; singleton)
   --dry-run           Print sandbox profile/command without executing
 
@@ -866,8 +867,18 @@ Strict Mode Auto-Allow:
   --trust untrusted suppresses the grant, even after opt-in. Project login_store
   cannot enable it. Without access, the harness cannot use a Keychain login.
   A sandboxed claude on macOS falls back to ~/.claude/.credentials.json if one
-  exists and is accessible; scode does not inspect that file. Explicit --allow
-  retains its authority. See docs/security.md for the exposure and precedence.
+  exists and is accessible; scode does not inspect that file.
+  Keychain services: unless the grant is applied and
+  ~/Library/Keychains/login.keychain-db exists as a file under the sandbox HOME,
+  the grant is not made and every macOS profile ends with a deny of Mach lookups
+  for com.apple.SecurityServer, com.apple.securityd.xpc, com.apple.authd,
+  com.apple.security.agent, com.apple.security.agent.login, and
+  com.apple.security.authhost. Keychain and
+  authorization calls then fail with an error and no dialog; TLS trust
+  evaluation is unaffected. This holds for every command, in every mode.
+  Explicit --allow retains its file authority, but an --allow of the Keychains
+  directory does not make the services reachable.
+  See docs/security.md for the exposure and precedence.
   Detection does not certify authentication compatibility.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
   --trust untrusted disables harness-state and Keychain auto-allows entirely.
@@ -1163,7 +1174,25 @@ run_with_stderr_log() {
   # header and reopened the symlink-replacement race this descriptor exists to
   # close. Only the stderr copy is addressed by path, and stderr already belongs
   # to the caller; -a keeps that copy from truncating a redirected stderr file.
-  tee -a /dev/fd/2 < "${stderr_pipe}" >&9 &
+  #
+  # A FIFO open for reading waits for a writer. If scode were ended by a
+  # signal after the writer is forked and before the run opens its write
+  # end, the writer would wait in that open forever, holding the
+  # caller's descriptors (observed: a TERM in that window left a forked
+  # bash behind for hours). So scode opens the pipe read-write first,
+  # which never waits, and the writer inherits that descriptor: its own
+  # open then returns at once whether or not scode is still alive. The
+  # writer closes the inherited descriptor only after its own read open
+  # (redirections apply left to right), so from the fork on the pipe
+  # always has a reader and an early write by the command cannot fail
+  # for want of one. After that close the writer sees EOF once every real
+  # write end is closed. With scode gone that is
+  # immediately, and it exits.
+  local _pipe_held=0
+  if { exec 6<>"${stderr_pipe}"; } 2>/dev/null; then
+    _pipe_held=1
+  fi
+  tee -a /dev/fd/2 < "${stderr_pipe}" >&9 6>&- &
   local tee_pid=$!
   local tee_signaled=0
 
@@ -1190,8 +1219,27 @@ run_with_stderr_log() {
   _scode_rand="$(od -An -N12 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || true)"
   [[ -n "$_scode_rand" ]] || _scode_rand="${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
   local _scode_sentinel="scode-log-complete run $$-${_scode_rand}"
+  # This replaces the read-write descriptor above with a write-only one,
+  # so scode is not a reader: a write to a pipe whose writer died still
+  # fails instead of filling the buffer. The new open happens while the
+  # old descriptor is still open, so it does not wait either.
+  # If that open fails while the read-write descriptor is held, the run
+  # stops before the launch: the command must not get a descriptor that
+  # can read the pipe, and closing it leaves the writer at EOF, where a
+  # launch by path would wait forever for a reader. With neither
+  # descriptor the old degrade path stands: no sentinel, launch by path.
   if ! { exec 6>>"${stderr_pipe}"; } 2>/dev/null; then
     _scode_sentinel=""
+    if [[ "$_pipe_held" -eq 1 ]]; then
+      { exec 6>&-; } 2>/dev/null || true
+      wait "${tee_pid}" 2>/dev/null || true
+      error "failed to open the log pipe for writing"
+      { exec 5>&-; } 2>/dev/null || true
+      exec 9>&-
+      rm -f "${stderr_pipe}"
+      rmdir "${tmp_dir}" 2>/dev/null || true
+      return 1
+    fi
   fi
 
   # Per-run queue for INT arriving in the launch phase: before the fork,
@@ -3566,7 +3614,7 @@ EOF
     esc_project="$(sbpl_escape "$project_dir")"
     cat <<EOF
 
-; Final read-only project invariant
+; Read-only project invariant (after every file grant)
 (deny file-write*
   (subpath "${esc_project}")
 )
@@ -5663,65 +5711,229 @@ fi
 HARNESS_STRICT_RO=()
 _auto_allowed=()
 
-# Let Keychain-backed harnesses use their own login store. Only construct
-# filesystem grants here: never inspect credentials or invoke a login tool.
+# -------- macOS keychain reach: the single decision --------
+# KEYCHAIN_REACH=1 means the launched command may use the login keychain.
+# Two rules read this one value and nothing else: the login-store file grant
+# below and the Mach rule emitted by emit_macos_keychain_service_rule. They
+# therefore cannot diverge. The state this prevents is open keychain daemons
+# next to a keychain the child cannot resolve: there Security.framework finds
+# no default keychain, and a store makes macOS show a dialog on the owner's
+# screen. An explicit --allow of the Keychains directory is a file rule and
+# does not set this value.
+# Only path facts are examined here: never inspect credentials or invoke a
+# login tool.
+KEYCHAIN_REACH=0
+KEYCHAIN_REACH_DECLINED=""
+LOGIN_STORE_KEYCHAINS="$HOME/Library/Keychains"
+LOGIN_STORE_PREFERENCES="$HOME/Library/Preferences/com.apple.security.plist"
+# The daemons behind every keychain and authorization dialog. securityd
+# (SecurityServer) and authd are the two a client talks to; the agent and
+# authhost names are denied as defense in depth. com.apple.securityd.xpc
+# serves the data-protection keychain: it refuses a command-line tool
+# without the entitlement, but a signed tool could use it, so it is denied
+# with the rest. HTTPS clients were checked with all six denied.
+readonly DARWIN_KEYCHAIN_UI_SERVICES=(
+  com.apple.SecurityServer
+  com.apple.securityd.xpc
+  com.apple.authd
+  com.apple.security.agent
+  com.apple.security.agent.login
+  com.apple.security.authhost
+)
+
+# Prints the keychain path the keychain preference file records under KEY
+# (DefaultKeychain or LoginKeychain), or nothing when it records none.
+# Security.framework uses element zero of the array. It ignores a file it
+# cannot parse and a value that is not an array: both print nothing.
+# An empty array returns 2. For DefaultKeychain that was measured to mean
+# "no default keychain" with no fallback (errSecNoDefaultKeychain). A first
+# element that is not a dictionary with a non-empty string DbName also
+# returns 2. macOS was measured to fall back to the login keychain there,
+# but that fallback is undocumented, so scode takes the side that cannot
+# raise a dialog.
+# Returns 3 when the question cannot be answered: the file is unreadable,
+# or this plutil has no -type query.
+recorded_keychain_from_preferences() {
+  local file="$1" key="$2" name probe
+  # Only a regular file is read. plutil is part of macOS; a dry run that
+  # only simulates the platform elsewhere has no preferences.
+  [[ -f "$file" && ! -L "$file" && -x /usr/bin/plutil ]] || return 0
+  # A file that cannot be read cannot be classified, and an unread record
+  # must not count as "nothing recorded".
+  [[ -r "$file" ]] || return 3
+  [[ -s "$file" ]] || return 0
+  # A file plutil cannot parse is one Security.framework ignores.
+  /usr/bin/plutil -lint "$file" >/dev/null 2>&1 || return 0
+  # The -type query appeared in macOS 12. Ask it about a known document:
+  # anything but the right answer means this plutil cannot classify the file.
+  probe="$(printf '%s' '<plist version="1.0"><dict><key>k</key><array/></dict></plist>' |
+    /usr/bin/plutil -type k - 2>/dev/null || true)"
+  [[ "$probe" == array ]] || return 3
+  [[ "$(/usr/bin/plutil -type "$key" "$file" 2>/dev/null || true)" == array ]] || return 0
+  [[ "$(/usr/bin/plutil -type "$key.0" "$file" 2>/dev/null || true)" == dictionary &&
+     "$(/usr/bin/plutil -type "$key.0.DbName" "$file" 2>/dev/null || true)" == string ]] || return 2
+  # Command substitution drops trailing newlines, which would validate a
+  # different path than the recorded one. The marker keeps them; plutil
+  # itself adds exactly one. A name with any control character is refused.
+  name="$(/usr/bin/plutil -extract "$key.0.DbName" raw -o - "$file" 2>/dev/null && printf x)" || return 2
+  name="${name%x}"
+  name="${name%$'\n'}"
+  [[ -n "$name" && "$name" != *[[:cntrl:]]* ]] || return 2
+  printf '%s\n' "$name"
+}
+
+decide_keychain_reach() {
+  local declined="" login_path resolved block login_db default_db home_prefix
+  KEYCHAIN_REACH=0
+  KEYCHAIN_REACH_DECLINED=""
+  if [[ "$PLATFORM" != "darwin" ]]; then
+    KEYCHAIN_REACH_DECLINED="not macOS"
+    return 0
+  fi
+  case "${DETECTED_HARNESS:-}" in
+    claude|agy) ;;
+    *)
+      KEYCHAIN_REACH_DECLINED="the command is not a login-store harness (claude or agy)"
+      return 0
+      ;;
+  esac
+  if [[ "$NO_LOGIN_STORE" == 1 ]]; then
+    declined="--no-login-store or no_login_store: true is set"
+  elif [[ "$LOGIN_STORE" != 1 ]]; then
+    declined="login-store access is off by default"
+  elif [[ "$CLI_TRUST" == untrusted ]]; then
+    declined="--trust untrusted disables automatic grants"
+  elif [[ "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS" &&
+          "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS.exe" ]]; then
+    declined="the invoked name is not the harness launcher (entry scripts and wrappers are ineligible)"
+  elif [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
+    declined="the harness target is not a regular executable"
+  elif [[ "$(dd if="$COMMAND_BINARY_PATH" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" == 2321 ]]; then
+    declined="the resolved harness target is an interpreter entry script (entry scripts and wrappers are ineligible)"
+  elif is_same_or_descendant_path "$COMMAND_BINARY_PATH" "$PROJECT_DIR"; then
+    declined="the resolved harness executable is inside the project"
+  fi
+  if [[ -z "$declined" ]]; then
+    for login_path in "$LOGIN_STORE_KEYCHAINS" "$LOGIN_STORE_PREFERENCES"; do
+      resolved="$(_realpath "$login_path")"
+      # A redirected store must not expose a different Library subtree.
+      if [[ "$resolved" != "$login_path" ]]; then
+        declined="path is redirected: ${login_path}"
+        break
+      fi
+      for block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"} \
+          ${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"} \
+          ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
+        if paths_overlap_hierarchy "$resolved" "$block"; then
+          declined="overlaps block ${block}"
+          break
+        fi
+      done
+      [[ -n "$declined" ]] && break
+    done
+  fi
+  if [[ -z "$declined" ]]; then
+    # The default keychain must resolve from the HOME exported to the child:
+    # a regular file that, after following links, is still inside the granted
+    # directory. Anything else means the child finds no default keychain.
+    login_db="$LOGIN_STORE_KEYCHAINS/login.keychain-db"
+    resolved="$(_realpath "$login_db" 2>/dev/null)" || resolved=""
+    if [[ -z "$resolved" || ! -f "$resolved" ]] ||
+        ! is_descendant_path "$resolved" "$LOGIN_STORE_KEYCHAINS"; then
+      declined="no login keychain resolves at ${login_db}"
+    fi
+  fi
+  if [[ -z "$declined" ]]; then
+    # Security.framework opens the recorded default keychain, and falls
+    # back to the recorded login keychain when no default is recorded
+    # (measured: a LoginKeychain record naming a missing file leaves no
+    # default keychain even though login.keychain-db exists). Each record
+    # that is present must name an existing regular file inside the granted
+    # directory, or the child is left without a default keychain it can
+    # open. A name ending in .keychain that does not exist stands for its
+    # -db file, as on accounts migrated from older releases.
+    local prefs_rc pref_key pref_label
+    for pref_key in DefaultKeychain LoginKeychain; do
+      [[ -z "$declined" ]] || break
+      pref_label="default"
+      [[ "$pref_key" == LoginKeychain ]] && pref_label="login"
+      prefs_rc=0
+      default_db="$(recorded_keychain_from_preferences "$LOGIN_STORE_PREFERENCES" "$pref_key")" || prefs_rc=$?
+      if [[ "$prefs_rc" -eq 3 ]]; then
+        declined="the preference file cannot be checked: ${LOGIN_STORE_PREFERENCES}"
+      elif [[ "$prefs_rc" -ne 0 ]]; then
+        declined="the preference file records no ${pref_label} keychain: ${LOGIN_STORE_PREFERENCES}"
+      elif [[ -n "$default_db" ]]; then
+        home_prefix=$'\176/'
+        [[ "$default_db" == "$home_prefix"* ]] && default_db="$HOME/${default_db#"$home_prefix"}"
+        if [[ "$default_db" != /* ]]; then
+          # A relative name would be resolved against scode's directory
+          # here and against the project directory in the child.
+          declined="the recorded ${pref_label} keychain is not an absolute path: ${default_db}"
+          break
+        fi
+        [[ "$default_db" == *.keychain && ! -e "$default_db" ]] && default_db="${default_db}-db"
+        resolved="$(_realpath "$default_db" 2>/dev/null)" || resolved=""
+        if [[ -z "$resolved" ]] || ! is_descendant_path "$resolved" "$LOGIN_STORE_KEYCHAINS"; then
+          declined="the recorded ${pref_label} keychain is outside ${LOGIN_STORE_KEYCHAINS}: ${default_db}"
+        elif [[ ! -f "$resolved" ]]; then
+          declined="the recorded ${pref_label} keychain does not exist: ${default_db}"
+        fi
+      fi
+    done
+  fi
+  KEYCHAIN_REACH_DECLINED="$declined"
+  if [[ -z "$declined" ]]; then
+    KEYCHAIN_REACH=1
+  fi
+  return 0
+}
+
+# Final macOS rule. Seatbelt lets a filtered mach-lookup deny win over the
+# unfiltered allows scode emits ((allow default), strict (allow mach-lookup)) in
+# either order; only a later filtered Mach allow of the same name could reopen
+# it, and scode emits none. File rules, including --allow paths, cannot.
+emit_macos_keychain_service_rule() {
+  local name
+  if [[ "$KEYCHAIN_REACH" == 1 ]]; then
+    return 0
+  fi
+  printf '\n; Keychain services (final): unreachable without an applied login-store grant\n'
+  printf '; and a resolvable login keychain. File grants do not reopen them.\n'
+  printf '(deny mach-lookup\n'
+  for name in "${DARWIN_KEYCHAIN_UI_SERVICES[@]}"; do
+    printf '  (global-name "%s")\n' "$name"
+  done
+  printf ')\n'
+}
+
+CLI_LOGIN_STORE="$LOGIN_STORE"
 [[ "$CONFIG_LOGIN_STORE" == 1 ]] && LOGIN_STORE=1
 if [[ "$CONFIG_NO_LOGIN_STORE" == 1 || "$PROJECT_NO_LOGIN_STORE" == 1 ]]; then
   NO_LOGIN_STORE=1
 fi
+decide_keychain_reach
 if [[ "$PLATFORM" == "darwin" ]]; then
   case "${DETECTED_HARNESS:-}" in
     claude|agy)
-      _login_declined=""
-      if [[ "$NO_LOGIN_STORE" == 1 ]]; then
-        _login_declined="--no-login-store or no_login_store: true is set"
-      elif [[ "$LOGIN_STORE" != 1 ]]; then
-        _login_declined="login-store access is off by default"
-      elif [[ "$CLI_TRUST" == untrusted ]]; then
-        _login_declined="--trust untrusted disables automatic grants"
-      elif [[ "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS" &&
-              "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS.exe" ]]; then
-        _login_declined="the invoked name is not the harness launcher (entry scripts and wrappers are ineligible)"
-      elif [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
-        _login_declined="the harness target is not a regular executable"
-      elif [[ "$(dd if="$COMMAND_BINARY_PATH" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" == 2321 ]]; then
-        _login_declined="the resolved harness target is an interpreter entry script (entry scripts and wrappers are ineligible)"
-      elif is_same_or_descendant_path "$COMMAND_BINARY_PATH" "$PROJECT_DIR"; then
-        _login_declined="the resolved harness executable is inside the project"
-      fi
-      _login_keychains="$HOME/Library/Keychains"
-      _login_preferences="$HOME/Library/Preferences/com.apple.security.plist"
-      _login_paths=("$_login_keychains" "$_login_preferences")
-      if [[ -z "$_login_declined" ]]; then
-        for _login_path in "${_login_paths[@]}"; do
-          dir="$(_realpath "$_login_path")"
-          # A redirected store must not expose a different Library subtree.
-          if [[ "$dir" != "$_login_path" ]]; then
-            _login_declined="path is redirected: ${_login_path}"
-            break
-          fi
-          for _block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"} \
-              ${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"} \
-              ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
-            if paths_overlap_hierarchy "$dir" "$_block"; then
-              _login_declined="overlaps block ${_block}"
-              break
-            fi
-          done
-          [[ -n "$_login_declined" ]] && break
-        done
-      fi
-      if [[ -n "$_login_declined" ]]; then
-        info "${DETECTED_HARNESS}: no automatic login-store grant: ${_login_declined}; without explicit path grants, the sandbox does not reach the macOS Keychain, so a Keychain login is not available inside it; --login-store (or user login_store: true) grants ${_login_keychains} read-write and ${_login_preferences} read-only when present, subject to eligibility and blocks; see docs/security.md for what that exposes"
-      else
-        ALL_ALLOWED+=("$_login_keychains")
+      if [[ "$KEYCHAIN_REACH" == 1 ]]; then
+        ALL_ALLOWED+=("$LOGIN_STORE_KEYCHAINS")
         ALL_ALLOWED_SOURCES+=("auto")
         # One regular file only: a directory or link here would turn the
         # read-only grant into a recursive or redirected one.
-        if [[ -f "$_login_preferences" && ! -L "$_login_preferences" ]]; then
-          ALL_ALLOWED_RO+=("$_login_preferences")
+        if [[ -f "$LOGIN_STORE_PREFERENCES" && ! -L "$LOGIN_STORE_PREFERENCES" ]]; then
+          ALL_ALLOWED_RO+=("$LOGIN_STORE_PREFERENCES")
         fi
-        info "${DETECTED_HARNESS}: allowing login store: ${_login_keychains} (read-write); ${_login_preferences} (read-only when present); see docs/security.md for what that exposes"
+        info "${DETECTED_HARNESS}: allowing login store: ${LOGIN_STORE_KEYCHAINS} (read-write); ${LOGIN_STORE_PREFERENCES} (read-only when present); see docs/security.md for what that exposes"
+      else
+        info "${DETECTED_HARNESS}: no automatic login-store grant: ${KEYCHAIN_REACH_DECLINED}; the sandbox does not reach the macOS Keychain (its services are denied and its files get no automatic grant; an explicit path grant gives files only and does not open the services), so a Keychain login is not available inside it; --login-store (or user login_store: true) grants ${LOGIN_STORE_KEYCHAINS} read-write and ${LOGIN_STORE_PREFERENCES} read-only when present, subject to eligibility, blocks, and an existing login.keychain-db; see docs/security.md for what that exposes"
+      fi
+      ;;
+    *)
+      # A --login-store that cannot apply is reported, not dropped. The
+      # user-config opt-in is not: it is set once for every command.
+      if [[ "$CLI_LOGIN_STORE" == 1 ]]; then
+        info "login-store access was requested but not granted: ${KEYCHAIN_REACH_DECLINED}; the keychain services stay denied"
       fi
       ;;
   esac
@@ -6301,7 +6513,7 @@ $(emit_macos_redeny_inside "$PROJECT_DIR" ${ALL_ALLOWED_RO[@]+"${ALL_ALLOWED_RO[
   # Reassert after explicit grants and the exact command auto-allow.
   PROFILE="${PROFILE}
 
-; Privilege command restriction (final)
+; Privilege command restriction (after every exec grant)
 (deny process-exec (regex #\"(/|^)(sudo|su|login|doas|pkexec)$\"))"
 
   if [[ "$STRICT" -eq 1 ]]; then
@@ -6322,6 +6534,13 @@ ${_identity_profile}"
     else
       warning "strict descendant teardown unavailable: Python/helper missing; detached descendants may survive"
     fi
+  fi
+
+  # Last rule of every macOS profile; see decide_keychain_reach.
+  _keychain_service_rule="$(emit_macos_keychain_service_rule)"
+  if [[ -n "$_keychain_service_rule" ]]; then
+    PROFILE="${PROFILE}
+${_keychain_service_rule}"
   fi
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then

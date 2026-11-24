@@ -54,8 +54,8 @@ require_precedence_runtime() {
     run env HOME="$PHOME" _SCODE_PLATFORM=darwin "$SCODE" --dry-run ${mode:+"$mode"} --ro \
       -C "$project" --allow "$parent" -- true
     [ "$status" -eq 0 ]
-    [[ "$output" == *"; Final read-only project invariant"$'\n'"(deny file-write*"$'\n'"  (subpath \"$project\")"* ]]
-    local tail="${output##*; Final read-only project invariant}"
+    [[ "$output" == *"; Read-only project invariant (after every file grant)"$'\n'"(deny file-write*"$'\n'"  (subpath \"$project\")"* ]]
+    local tail="${output##*; Read-only project invariant (after every file grant)}"
     [[ "$tail" != *"(allow file-read* file-write*"* ]]
   done
 }

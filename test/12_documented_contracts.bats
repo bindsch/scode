@@ -69,7 +69,7 @@ load test_helper
     [ "$mode" = strict ] && flags=(--strict)
     run env _SCODE_PLATFORM=darwin "$SCODE" --dry-run -C "$TEST_PROJECT" "${flags[@]}" --allow /usr -- /usr/bin/su
     [ "$status" -eq 0 ]
-    tail="${output##*Privilege command restriction (final)}"
+    tail="${output##*Privilege command restriction (after every exec grant)}"
     [[ "$tail" != "$output" ]]
     [[ "$tail" == *'(deny process-exec (regex #"(/|^)(sudo|su|login|doas|pkexec)$"))'* ]]
     [[ "$tail" != *'(allow '* ]]

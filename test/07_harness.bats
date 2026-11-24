@@ -181,11 +181,26 @@ load test_helper
 
 @test "strict+claude opt-in opens the login Keychain but not browser data" {
   [[ "$(uname -s)" != "Darwin" ]] && skip "macOS only"
-  mkdir -p "$TEST_PROJECT/project" "$TEST_PROJECT/bin"
+  mkdir -p "$TEST_PROJECT/project" "$TEST_PROJECT/bin" "$TEST_PROJECT/home/Library/Keychains"
   cp "$(type -P true)" "$TEST_PROJECT/bin/claude"
+  # A synthetic HOME with a stand-in login keychain: the grant needs the file
+  # to exist, and the test must not depend on the account's own store.
+  export HOME="$(cd "$TEST_PROJECT/home" && pwd -P)"
+  export SCODE_CONFIG="$TEST_PROJECT/empty.yaml"
+  : > "$SCODE_CONFIG"
+  : > "$HOME/Library/Keychains/login.keychain-db"
   run "$SCODE" --dry-run --login-store --strict -C "$TEST_PROJECT/project" -- "$TEST_PROJECT/bin/claude"
   [ "$status" -eq 0 ]
   [[ "$output" == *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" != *"(deny mach-lookup"* ]]
+  [[ "$output" != *"(subpath \"$HOME/Library/Application Support\")"* ]]
+  [[ "$output" != *"(subpath \"$HOME/Library/Caches\")"* ]]
+  # Without the stand-in the grant and the services both go.
+  rm -f "$HOME/Library/Keychains/login.keychain-db"
+  run "$SCODE" --dry-run --login-store --strict -C "$TEST_PROJECT/project" -- "$TEST_PROJECT/bin/claude"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" == *"(deny mach-lookup"*"(global-name \"com.apple.authd\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Application Support\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Caches\")"* ]]
 }

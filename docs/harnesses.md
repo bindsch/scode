@@ -106,10 +106,16 @@ exists and is accessible; scode does not inspect that file. Explicit grants
 retain their documented precedence. See [security](security.md) for exposure
 and the exact access a manual `--allow` provides.
 
-`/usr/bin/security` remains executable inside the sandbox, and the existing
-Mach lookup allowances permit access to `securityd`. The harness may use
-those facilities itself. scode does not initiate authentication or password
-dialogs; it cannot promise that a harness or macOS will never display one.
+`/usr/bin/security` remains executable inside the sandbox. `securityd`
+(`com.apple.SecurityServer`), `com.apple.securityd.xpc`, `com.apple.authd`, and the security agent names are
+reachable only when the login-store grant is applied and
+`~/Library/Keychains/login.keychain-db` exists under the sandbox HOME. Otherwise
+the grant is not made, the profile ends with a deny of those Mach lookups, and
+keychain or authorization calls from the sandbox fail with an error and no
+dialog. An explicit `--allow` of the Keychains directory grants the files only.
+scode does not initiate authentication or password dialogs. With the grant
+applied, a harness or macOS can still display one. See
+[keychain services](security.md#keychain-services-on-macos).
 
 `--no-credential-sync` is accepted as a compatibility no-op for 0.6.8.
 It neither inspects nor changes authentication. Login compatibility still

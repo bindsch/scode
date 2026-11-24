@@ -51,18 +51,23 @@ packaged files and preserves an unrelated fixture.
 
 ## Offline login-store verification
 
-Run `bats test/10_credential_sync.bats test/22_login_store.bats` with fixture-only commands and an
-isolated HOME. The gate checks zero calls to a fake `security` on PATH,
+Run `bats test/10_credential_sync.bats test/22_login_store.bats test/23_keychain_services.bats`
+with fixture-only commands and an isolated HOME. The gate checks zero calls to a fake `security` on PATH,
 unchanged synthetic credential files and backups, and the generated policy
 for normal, strict, legacy-flag, blocked, and untrusted runs. It verifies default
 denial, CLI/user opt-in, project restrictions, opt-out precedence, native install
 provenance, and read-only preferences. Kernel tests read synthetic preferences
-and deny writes, replacement, and creation when absent. Static checks
+and deny writes, replacement, and creation when absent. The keychain-services
+tests check that the final Mach deny is present in every configuration without
+an applied grant, and that lookups of every denied name
+(`com.apple.SecurityServer`, `com.apple.securityd.xpc`, `com.apple.authd`, and
+the security agent names) fail inside the sandbox while `com.apple.trustd` succeeds.
+They are passive: a bootstrap lookup sends no message to a daemon. Static checks
 reject credential commands in the launcher because its parent process pins
 PATH and cannot be intercepted by that spy.
 
-Do not invoke a real harness, read a Keychain, or create Keychain items for
-this gate. The tests establish scode's policy and fixture behavior. They do
+Do not invoke a real harness, run `/usr/bin/security`, read a Keychain, or
+create Keychain items for this gate, inside or outside a sandbox. The tests establish scode's policy and fixture behavior. They do
 not prove live authentication, refresh behavior, per-item Keychain isolation,
 or the absence of dialogs initiated by a harness or macOS. Live checks need
 separate authorization and a disposable account or VM.

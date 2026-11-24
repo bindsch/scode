@@ -13,6 +13,9 @@ setup() {
   : > "$SCODE_CONFIG"
   : > "$SECURITY_CALL_LOG"
   : > "$HOME/Library/Preferences/com.apple.security.plist"
+  # An empty stand-in: the launcher only checks that the default keychain
+  # file exists. Nothing opens it as a keychain.
+  : > "$HOME/Library/Keychains/login.keychain-db"
   cat > "$TEST_PROJECT/bin/security" <<'SH'
 #!/bin/sh
 printf '%s\n' "$*" >> "$SECURITY_CALL_LOG"

@@ -205,6 +205,46 @@ stop_watch_process() {
   [ -f "$log_file" ]
 }
 
+@test "runtime: TERM before the launch leaves no log writer behind" {
+  [[ -z "${SCODE_COVERAGE_TARGET:-}" ]] || skip "kcov owns the traced process and intercepts signals"
+  require_any_runtime_sandbox
+  # The log writer waits in its FIFO open until the run opens the other
+  # end. A TERM landing between the two used to leave it waiting forever.
+  # The log file appears shortly before the writer is forked, so a TERM
+  # sent soon after it shows often lands in that window. The check is
+  # statistical: before the fix it failed in about half the runs.
+  local round=0 log_file="" command_pid="" attempts=0 left=""
+  while (( round < 12 )); do
+    log_file="$TEST_PROJECT/writer-leak-$round.log"
+    "$SCODE" --log "$log_file" -C "$TEST_PROJECT" -- /bin/sleep 30 &
+    command_pid=$!
+    attempts=0
+    while [[ ! -f "$log_file" && "$attempts" -lt 500 ]]; do
+      sleep 0.01
+      attempts=$((attempts + 1))
+    done
+    # Spread the signal over the next few tens of milliseconds: the log
+    # file is installed a little before the writer is forked.
+    sleep "0.0$(( (round % 6) * 1 ))"
+    kill -TERM "$command_pid"
+    wait "$command_pid" || true
+    round=$((round + 1))
+  done
+  attempts=0
+  while (( attempts < 50 )); do
+    left="$(pgrep -f -- "--log $TEST_PROJECT/writer-leak-" || true)"
+    [[ -n "$left" ]] || break
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  if [[ -n "$left" ]]; then
+    # shellcheck disable=SC2086
+    kill -KILL $left 2>/dev/null || true
+    echo "left behind: $left"
+    false
+  fi
+}
+
 # ---------- Audit subcommand ----------
 
 @test "audit parses macOS deny patterns" {

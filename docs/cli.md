@@ -28,7 +28,7 @@ harness-specific state access, not a requirement to use a known harness.
 | `--keep-env NAME[,NAME...]` | Exempt exact valid names from scrubbing, preserving empty values; injection names remain refused |
 | `--no-credential-sync` | Compatibility no-op for 0.6.8; scode never reads, copies, checks, or changes a harness login |
 | `--login-store` | Opt in to macOS `claude`/`agy` login-store access; off by default; see the exposure below |
-| `--no-login-store` | Suppress login-store grants; wins over CLI/user opt-in regardless of order. Explicit path grants retain their authority |
+| `--no-login-store` | Suppress login-store grants; wins over CLI/user opt-in regardless of order. Explicit path grants retain their file authority; keychain services stay denied |
 | `--log FILE` | Replace FILE with private stderr capture; create missing parent directories |
 | `--dry-run` | Print generated policy/command without launching |
 
@@ -62,6 +62,15 @@ directory. It cannot change the default keychain or search list through the
 read-only preference file. Without the grant, a sandboxed `claude` on macOS falls
 back to `~/.claude/.credentials.json` if one exists and is accessible; scode does
 not inspect that file. See [security](security.md) for manual-grant precedence.
+
+Unless the grant is applied and `~/Library/Keychains/login.keychain-db` exists
+under the sandbox HOME, the grant is not made and every macOS profile ends with a
+deny of Mach lookups for `com.apple.SecurityServer`, `com.apple.securityd.xpc`, `com.apple.authd`,
+`com.apple.security.agent`, `com.apple.security.agent.login`, and
+`com.apple.security.authhost`. This applies to every command and mode. Keychain
+and authorization calls then fail with an error and no dialog. An explicit
+`--allow` of the Keychains directory grants the files only. See
+[keychain services](security.md#keychain-services-on-macos).
 
 `--allow-staged` refuses symlinked base files. Its regex matches without regard
 to case across the whole staged path, including directory and base names, even
