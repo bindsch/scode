@@ -17,9 +17,12 @@ KEYCHAIN_SERVICE_NAMES=(
   com.apple.security.authhost
 )
 
-# The profile is everything a dry-run prints before its "# Command:" trailer.
+# The profile runs from its last "(version 1)" line to the "# Command:"
+# trailer. Under kcov the tracer echoes multi-line values ahead of it, so
+# text before that line is not part of the profile.
 profile_text() {
-  printf '%s\n' "$output" | sed '/^# Command:/,$d'
+  printf '%s\n' "$output" | sed '/^# Command:/,$d' |
+    awk '/^\(version 1\)$/ { buf = "" } { buf = buf $0 "\n" } END { printf "%s", buf }'
 }
 
 # assert_keychain_services denied|reachable
@@ -245,9 +248,13 @@ assert_keychain_services() {
   /usr/bin/plutil -insert DefaultKeychain.DbName -string "/nonexistent/x.keychain-db" "$prefs"
   run_profile --login-store -- claude
   assert_keychain_services reachable
-  /usr/bin/plutil -remove DefaultKeychain.DbName "$prefs"
-  /usr/bin/plutil -insert DefaultKeychain.0 -dictionary "$prefs"
-  /usr/bin/plutil -insert DefaultKeychain.0.DbName -string "/nonexistent/x.keychain-db" "$prefs"
+  # A dictionary with a key named "0", written as XML: older plutil
+  # releases refuse to build it by key path.
+  cat > "$prefs" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>DefaultKeychain</key><dict><key>0</key><dict>
+<key>DbName</key><string>/nonexistent/x.keychain-db</string></dict></dict></dict></plist>
+PLIST
   run_profile --login-store -- claude
   assert_keychain_services reachable
 }
