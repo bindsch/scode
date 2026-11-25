@@ -50,8 +50,8 @@ read-only preference file. Without the grant, a sandboxed `claude` on macOS fall
 back to `~/.claude/.credentials.json` if one exists and is accessible; scode does
 not inspect that file. See [security](security.md) for manual-grant precedence.
 Without the applied grant, or when `login.keychain-db` is missing from that
-directory, macOS keychain services are denied; `allowed` entries for the
-Keychains directory grant files only. See
+directory, the macOS authorization services and the login keychain directories are
+denied; `allowed` entries for the Keychains directory have no effect. See
 [keychain services](security.md#keychain-services-on-macos).
 
 `allowed_staged` (CLI `--allow-staged`) refuses symlinked base files. Matching is

@@ -81,7 +81,7 @@ load login_store_helper
         # The blanket allow is narrowed only when the grant is not applied.
         [[ "$output" != *"(deny mach-lookup"* ]]
         run_profile --strict -- "$harness"
-        [[ "$output" == *"(allow mach-lookup)"*"(deny mach-lookup"*"(global-name \"com.apple.SecurityServer\")"* ]]
+        [[ "$output" == *"(allow mach-lookup)"*"(deny mach-lookup"*"(global-name \"com.apple.authd\")"* ]]
         [[ "$output" == *"(allow process-exec)"* ]]
         [[ "$output" == *'(subpath "/usr")'* ]]
       else
@@ -233,7 +233,10 @@ SH
   ln -s "$HOME/Library/other" "$HOME/Library/Keychains"
   run_profile --login-store --strict -- agy
   assert_access "$HOME/Library/other/data" no
-  [[ "$output" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  # No allow names the directory; it appears only in the final deny.
+  local granted="${output%%"(deny mach-lookup"*}"
+  [[ "$granted" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" == *"(deny mach-lookup"*"(deny file-read* file-write*"*"(subpath \"$HOME/Library/Keychains\")"* ]]
 }
 
 @test "no-keychain: Linux has no macOS login grants" {
@@ -349,8 +352,9 @@ assert_native_install_grant() {
   printf 'no_login_store: false\n' > "$SCODE_CONFIG"
   run_profile --login-store -- claude
   assert_access "$HOME/Library/Keychains/login.keychain-db" yes
+  # Without the grant the final rule closes the directory, whatever is allowed.
   run_profile --no-login-store --allow "$HOME/Library/Keychains" -- claude
-  assert_access "$HOME/Library/Keychains/login.keychain-db" yes
+  assert_access "$HOME/Library/Keychains/login.keychain-db" no
   printf 'no_login_store: maybe\n' > "$SCODE_CONFIG"
   run "$SCODE" --dry-run -C "$HOME/project" -- claude
   [ "$status" -eq 1 ]

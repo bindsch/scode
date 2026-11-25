@@ -199,8 +199,10 @@ load test_helper
   rm -f "$HOME/Library/Keychains/login.keychain-db"
   run "$SCODE" --dry-run --login-store --strict -C "$TEST_PROJECT/project" -- "$TEST_PROJECT/bin/claude"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
-  [[ "$output" == *"(deny mach-lookup"*"(global-name \"com.apple.authd\")"* ]]
+  # No allow names the directory; it appears only in the final deny.
+  local granted="${output%%"(deny mach-lookup"*}"
+  [[ "$granted" != *"(subpath \"$HOME/Library/Keychains\")"* ]]
+  [[ "$output" == *"(deny mach-lookup"*"(global-name \"com.apple.authd\")"*"(deny file-read* file-write*"*"(subpath \"$HOME/Library/Keychains\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Application Support\")"* ]]
   [[ "$output" != *"(subpath \"$HOME/Library/Caches\")"* ]]
 }

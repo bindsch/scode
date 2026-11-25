@@ -2,14 +2,14 @@
 # Keychain service reach on macOS. One decision in the launcher yields both the
 # login-store file grant and the Mach rule for the keychain daemons.
 #
-# Every check here is passive: profile text, and bootstrap lookups that only
-# ask launchd whether a name may be looked up. No test stores to or reads from
-# a keychain, runs a Keychain tool, or sends a message to a security daemon.
+# The checks are profile text, bootstrap lookups that only ask launchd whether
+# a name may be looked up, and one probe that asks authd for an authorization
+# session with no rights (it shows nothing and asks for nothing). No test
+# stores to or reads from a keychain or runs a Keychain tool.
 load test_helper
 load login_store_helper
 
 KEYCHAIN_SERVICE_NAMES=(
-  com.apple.SecurityServer
   com.apple.securityd.xpc
   com.apple.authd
   com.apple.security.agent
@@ -155,8 +155,8 @@ assert_keychain_services() {
         # shellcheck disable=SC2086
         run_profile $mode --allow "$extra" -- "$cmd"
         assert_keychain_services denied
-        # The file rule still has its documented authority.
-        assert_access "$HOME/Library/Keychains/login.keychain-db" yes
+        # Without the grant the final rule closes the directory again.
+        assert_access "$HOME/Library/Keychains/login.keychain-db" no
       done
     done
   done
@@ -366,15 +366,19 @@ PLIST
   for doc in help README.md docs/security.md docs/policy.md docs/cli.md docs/harnesses.md CHANGELOG.md; do
     if [[ "$doc" == help ]]; then text="$help"; else text="$(cat "$BATS_TEST_DIRNAME/../$doc")"; fi
     text="$(printf '%s\n' "$text" | tr '\n' ' ' | tr -d '`' | tr -s ' ')"
-    [[ "$text" == *"com.apple.SecurityServer"*"com.apple.authd"* ]]
+    [[ "$text" == *"com.apple.authd"* ]]
+    [[ "$text" == *"com.apple.SecurityServer"* ]]
     [[ "$text" == *"login.keychain-db"* ]]
   done
   text="$(tr '\n' ' ' < "$BATS_TEST_DIRNAME/../docs/security.md" | tr -d '`' | tr -s ' ')"
   [[ "$text" == *"com.apple.security.agent"*"com.apple.security.authhost"* ]]
   [[ "$text" == *"com.apple.securityd.xpc"* ]]
   [[ "$text" != *"com.apple.securityd.xpc) also stays reachable"* ]]
-  [[ "$text" == *"does not make the services reachable"* ]]
+  [[ "$text" == *"without the login-store grant gives nothing"* ]]
   [[ "$text" != *"securityd reachable for that purpose"* ]]
+  [[ "$text" == *"com.apple.SecurityServer (securityd) is left reachable on purpose"* ]]
+  [[ "$text" == *"AuthorizationCreate fails inside the sandbox"* ]]
+  [[ "$text" == *"The last rule of the profile denies reads and writes of the login keychain directories"* ]]
 }
 
 # ---------- Kernel: passive bootstrap lookups ----------
@@ -404,19 +408,66 @@ lookup_code() {
   printf '%s\n' "$1" | sed -n "s/^LOOKUP $2 \\(-\\{0,1\\}[0-9][0-9]*\\)\$/\\1/p"
 }
 
-@test "keychain services kernel: SecurityServer and authd are unreachable without the grant; trustd stays reachable" {
+@test "keychain services: securityd is never denied; the login keychain directories are closed by the last rule" {
+  # 0.6.9 denied com.apple.SecurityServer, and a client that loads the
+  # system roots through the keychain API (Codex) had none: every HTTPS
+  # request it made failed. The files are kept away instead.
+  require_node
+  local mode profile tail
+  for mode in '' --strict --ro '--trust untrusted' --no-login-store "--allow $HOME/Library/Keychains" \
+      "--allow $HOME/Library" "--allow-ro $HOME/Library/Keychains" "--strict --allow $HOME/Library/Keychains"; do
+    # shellcheck disable=SC2086
+    run_profile $mode -- true
+    assert_keychain_services denied
+    profile="$(profile_text)"
+    [[ "$profile" != *'"com.apple.SecurityServer"'* ]]
+    tail="${profile##*"(deny mach-lookup"}"
+    [[ "$tail" == *'(deny file-read* file-write*'*"(subpath \"$HOME/Library/Keychains\")"* ]]
+    assert_access "$HOME/Library/Keychains/login.keychain-db" no
+  done
+  # The array entries are bare names, one per line.
+  local services
+  services="$(sed -n '/^readonly DARWIN_KEYCHAIN_UI_SERVICES=(/,/^)/p' "$SCODE_SOURCE")"
+  [[ "$services" == *$'\n'"  com.apple.authd"$'\n'* ]]
+  [[ "$services" != *"com.apple.SecurityServer"* ]]
+  # The project directory is no way in either.
+  _SCODE_PLATFORM=darwin run "$SCODE" --dry-run -C "$HOME/Library/Keychains" -- true
+  [ "$status" -eq 0 ]
+  assert_access "$HOME/Library/Keychains/login.keychain-db" no
+}
+
+@test "keychain services: a keychain directory reached through a link is closed where the link leads" {
+  local private="$TEST_PROJECT/private-home" outside="$TEST_PROJECT/outside-keychains" mode
+  mkdir -p "$private/Library" "$private/project" "$outside"
+  private="$(cd "$private" && pwd -P)"; outside="$(cd "$outside" && pwd -P)"
+  : > "$outside/login.keychain-db"
+  ln -s "$outside" "$private/Library/Keychains"
+  for mode in '' --strict "--allow $outside"; do
+    # shellcheck disable=SC2086
+    HOME="$private" _SCODE_PLATFORM=darwin run "$SCODE" --dry-run $mode -C "$private/project" -- true
+    [ "$status" -eq 0 ]
+    local tail="${output##*"(deny mach-lookup"}"
+    [[ "$tail" == *"(subpath \"$private/Library/Keychains\")"* ]]
+    [[ "$tail" == *"(subpath \"$outside\")"* ]]
+    [[ "$output" != *'"com.apple.SecurityServer"'* ]]
+  done
+}
+
+@test "keychain services kernel: authd and the agents are unreachable without the grant; trustd and securityd stay reachable" {
   require_runtime_sandbox
   local probe="$HOME/project/lookup-probe" baseline name mode checked=0
   build_lookup_probe "$probe"
   # Unsandboxed baseline: which names this host registers at all.
-  baseline="$("$probe" "${KEYCHAIN_SERVICE_NAMES[@]}" com.apple.trustd)"
+  baseline="$("$probe" "${KEYCHAIN_SERVICE_NAMES[@]}" com.apple.trustd com.apple.SecurityServer)"
   [ "$(lookup_code "$baseline" com.apple.trustd)" = 0 ] || skip "com.apple.trustd is not registered on this host"
   for mode in '' --strict --ro '--trust untrusted' --no-login-store \
       "--allow $HOME/Library/Keychains" "--strict --allow $HOME/Library/Keychains" \
       "--allow $HOME/Library"; do
     # shellcheck disable=SC2086
-    run "$SCODE" $mode -C "$HOME/project" -- "$probe" "${KEYCHAIN_SERVICE_NAMES[@]}" com.apple.trustd
+    run "$SCODE" $mode -C "$HOME/project" -- "$probe" "${KEYCHAIN_SERVICE_NAMES[@]}" com.apple.trustd com.apple.SecurityServer
     echo "$mode: $output"
+    # securityd is as reachable inside the sandbox as outside it.
+    [ "$(lookup_code "$output" com.apple.SecurityServer)" = 0 ]
     [ "$status" -eq 0 ]
     for name in "${KEYCHAIN_SERVICE_NAMES[@]}"; do
       # Never reachable; where the host registers the name, the failure is
@@ -457,7 +508,7 @@ lookup_code() {
     run "$SCODE" --login-store $mode -C "$HOME/project" -- claude com.apple.SecurityServer com.apple.authd com.apple.trustd
     echo "$mode no keychain: $output"
     [ "$status" -eq 0 ]
-    [ "$(lookup_code "$output" com.apple.SecurityServer)" = 1100 ]
+    [ "$(lookup_code "$output" com.apple.SecurityServer)" = 0 ]
     [ "$(lookup_code "$output" com.apple.authd)" = 1100 ]
     [ "$(lookup_code "$output" com.apple.trustd)" = 0 ]
   done
@@ -517,4 +568,246 @@ STUB
   _SCODE_PLATFORM=darwin run "$SCODE" --dry-run -C "$TEST_PROJECT" -- codex --version
   [ "$status" -eq 0 ]
   [[ "$output" != *"login-store access was requested"* ]]
+}
+
+@test "keychain services kernel: no authorization session can be made without the grant, and a login keychain file cannot be read" {
+  # The dialog "A keychain cannot be found to store ..." is requested
+  # through an authorization session. Making a session with no rights shows
+  # nothing and asks nothing, so this is a passive check: it succeeds
+  # outside the sandbox and must fail inside it.
+  require_runtime_sandbox
+  command -v cc >/dev/null 2>&1 || skip "C compiler unavailable"
+  local probe="$HOME/project/authz-probe" mode
+  cat > "$TEST_PROJECT/authz-probe.c" <<'C'
+#include <Security/Authorization.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+  AuthorizationRef ref = NULL;
+  OSStatus status = AuthorizationCreate(NULL, NULL, kAuthorizationFlagDefaults, &ref);
+  printf("AUTHZ %d\n", (int)status);
+  if (ref != NULL) AuthorizationFree(ref, kAuthorizationFlagDefaults);
+  if (argc > 1) {
+    FILE *keychain = fopen(argv[1], "rb");
+    printf("LOGIN-KEYCHAIN %s\n", keychain == NULL ? "unreadable" : "readable");
+    if (keychain != NULL) fclose(keychain);
+  }
+  return 0;
+}
+C
+  cc -o "$probe" "$TEST_PROJECT/authz-probe.c" -framework Security >/dev/null 2>&1 || skip "cannot compile the authorization probe"
+  [[ "$("$probe")" == "AUTHZ 0"* ]] || skip "this host makes no authorization session outside the sandbox"
+  [[ "$("$probe" "$HOME/Library/Keychains/login.keychain-db")" == *"LOGIN-KEYCHAIN readable"* ]]
+  for mode in '' --strict --ro '--trust untrusted' --no-login-store "--allow $HOME/Library/Keychains" "--allow $HOME/Library"; do
+    # shellcheck disable=SC2086
+    run "$SCODE" $mode -C "$HOME/project" -- "$probe" "$HOME/Library/Keychains/login.keychain-db"
+    echo "$mode: $output"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"AUTHZ "* ]]
+    [[ "$output" != *"AUTHZ 0"* ]]
+    [[ "$output" == *"LOGIN-KEYCHAIN unreadable"* ]]
+  done
+}
+
+@test "keychain services kernel: no other route reaches a file in the login keychain directory" {
+  # With securityd reachable, the file rule is the barrier. A hard link, a
+  # clone, a symbolic link, the firmlinked path and a rename must all fail.
+  require_runtime_sandbox
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  local mode
+  printf 'synthetic\n' > "$HOME/Library/Keychains/login.keychain-db"
+  for mode in '' --strict "--allow $HOME/Library/Keychains" "--allow $HOME/Library"; do
+    # shellcheck disable=SC2086
+    run "$SCODE" $mode -C "$HOME/project" -- /bin/sh -c '
+      K="$HOME/Library/Keychains/login.keychain-db"
+      cat "$K" >/dev/null 2>&1 && echo DIRECT-READ
+      ln "$K" ./hard 2>/dev/null && cat ./hard >/dev/null 2>&1 && echo HARDLINK-READ
+      cp -c "$K" ./clone 2>/dev/null && echo CLONE-READ
+      cat "/System/Volumes/Data$K" >/dev/null 2>&1 && echo FIRMLINK-READ
+      ln -s "$K" ./sym 2>/dev/null; cat ./sym >/dev/null 2>&1 && echo SYMLINK-READ
+      mv "$K" ./moved 2>/dev/null && echo MOVED
+      echo DONE'
+    echo "$mode: $output"
+    [[ "$output" == *"DONE"* ]]
+    [[ "$output" != *"-READ"* ]]
+    [[ "$output" != *"MOVED"* ]]
+    rm -f "$HOME/project/hard" "$HOME/project/clone" "$HOME/project/sym" "$HOME/project/moved"
+  done
+  [ -f "$HOME/Library/Keychains/login.keychain-db" ]
+}
+
+@test "keychain services: a keychain directory path the profile cannot carry stops the launch" {
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  local private="$TEST_PROJECT/odd-home" target
+  target="$TEST_PROJECT/odd"$'\t'"target"
+  mkdir -p "$private/Library" "$private/project" "$target"
+  private="$(cd "$private" && pwd -P)"
+  ln -s "$target" "$private/Library/Keychains"
+  HOME="$private" run "$SCODE" --dry-run -C "$private/project" -- true
+  [ "$status" -ne 0 ]
+  [[ "$output" != *'(subpath "")'* ]]
+}
+
+@test "keychain services: user keychains recorded in the preference file are closed too, by every link name" {
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  # A keychain outside ~/Library/Keychains that the account records (as the
+  # default, the login keychain, or in the search list) is readable in
+  # normal mode, and securityd is reachable: the final rule must name it.
+  local prefs="$HOME/Library/Preferences/com.apple.security.plist" work="$HOME/work-keychains" hop="$HOME/hop"
+  mkdir -p "$HOME/Library/Preferences" "$work"
+  : > "$work/ci.keychain-db"; : > "$work/second.keychain-db"; : > "$work/old.keychain-db"
+  /usr/bin/plutil -create xml1 "$prefs"
+  /usr/bin/plutil -insert DefaultKeychain -array "$prefs"
+  /usr/bin/plutil -insert DefaultKeychain.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DefaultKeychain.0.DbName -string "$work/ci.keychain-db" "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList -array "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0.DbName -string "~/work-keychains/second.keychain-db" "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1.DbName -string "$work/old.keychain" "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.2 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.2.DbName -string "/Library/Keychains/System.keychain" "$prefs"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  local tail="${output##*"(deny mach-lookup"}" name
+  for name in "$work/ci.keychain-db" "$work/second.keychain-db" "$work/old.keychain" "$work/old.keychain-db" "$HOME/Library/Keychains"; do
+    [[ "$tail" == *"(subpath \"$name\")"* ]]
+  done
+  # The system domain is left readable: certificates are loaded from it.
+  [[ "$tail" != *"/Library/Keychains/System.keychain"* ]]
+  # Both names are closed whichever exists: macOS may open either, and a
+  # recorded -db name closes its older twin as well.
+  : > "$work/old.keychain"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" == *"(subpath \"$work/old.keychain\")"* ]]
+  [[ "$tail" == *"(subpath \"$work/old.keychain-db\")"* ]]
+  [[ "$tail" == *"(subpath \"$work/ci.keychain\")"* ]]
+  rm -f "$work/old.keychain"
+
+  # Review of 0.6.10: the Data-volume spelling of a user file is no system
+  # keychain; an element without a DbName does not end the list; a list of
+  # any length is read to its end; a dictionary is not a list.
+  rm -f "$prefs"; /usr/bin/plutil -create xml1 "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList -array "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1.DbName -string "/System/Volumes/Data$work/ci.keychain-db" "$prefs"
+  local n
+  for ((n = 2; n < 70; n++)); do
+    /usr/bin/plutil -insert "DLDBSearchList.$n" -dictionary "$prefs"
+    /usr/bin/plutil -insert "DLDBSearchList.$n.DbName" -string "$work/k$n.keychain-db" "$prefs"
+  done
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" == *"ci.keychain-db\")"* ]]
+  [[ "$tail" == *"(subpath \"$work/k69.keychain-db\")"* ]]
+  cat > "$prefs" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict><key>DLDBSearchList</key><dict><key>0</key><dict>
+<key>DbName</key><string>$HOME/project</string></dict></dict></dict></plist>
+PLIST
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" != *"(subpath \"$HOME/project\")"* ]]
+  # A recorded name that is a directory names no keychain and closes nothing.
+  rm -f "$prefs"; /usr/bin/plutil -create xml1 "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList -array "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0.DbName -string "/" "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.1.DbName -string "." "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.2 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.2.DbName -string "/missing/.." "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.3 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.3.DbName -string "$HOME/project/missing/.." "$prefs"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" != *'(subpath "/")'* ]]
+  [[ "$tail" != *"(subpath \"$HOME/project\")"* ]]
+  # A relative recorded name is read from the directory the command runs in.
+  rm -f "$prefs"; /usr/bin/plutil -create xml1 "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList -array "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0.DbName -string "local.keychain-db" "$prefs"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" == *"/project/local.keychain-db\")"* ]]
+  # A name with a control character whose -db file exists stops the launch.
+  rm -f "$prefs"; /usr/bin/plutil -create xml1 "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList -array "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0 -dictionary "$prefs"
+  /usr/bin/plutil -insert DLDBSearchList.0.DbName -string "$work/odd"$'\t'".keychain" "$prefs"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  : > "$work/odd"$'\t'".keychain-db"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -ne 0 ]
+  rm -f "$work/odd"$'\t'".keychain-db"
+  # A preference file that cannot be read may record keychains: the launch stops.
+  if [[ "$(id -u)" -ne 0 ]]; then
+    chmod 000 "$prefs"
+    run "$SCODE" --dry-run -C "$HOME/project" -- true
+    chmod 600 "$prefs"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot write the keychain rule"* ]]
+  fi
+
+  # The login keychain file itself may be a link: where it leads is closed.
+  rm -f "$prefs"
+  : > "$HOME/project/relocated.keychain-db"
+  rm -f "$HOME/Library/Keychains/login.keychain-db"
+  ln -s "$HOME/project/relocated.keychain-db" "$HOME/Library/Keychains/login.keychain-db"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  [[ "$tail" == *"/project/relocated.keychain-db\")"* ]]
+  rm -f "$HOME/Library/Keychains/login.keychain-db"; : > "$HOME/Library/Keychains/login.keychain-db"
+
+  # Two link hops: every name on the way is closed, not only the two ends.
+  rm -f "$prefs"
+  mv "$HOME/Library/Keychains" "$HOME/vault"
+  ln -s "$HOME/vault" "$hop"
+  ln -s "$hop" "$HOME/Library/Keychains"
+  run "$SCODE" --dry-run -C "$HOME/project" -- true
+  [ "$status" -eq 0 ]
+  tail="${output##*"(deny mach-lookup"}"
+  for name in "$HOME/Library/Keychains" "$hop" "$HOME/vault"; do
+    [[ "$tail" == *"(subpath \"$name\")"* ]]
+  done
+}
+
+@test "keychain services kernel: a writable parent cannot be renamed to give the keychain files another name" {
+  # Review of 0.6.10: with --allow of ~/Library the parent could be renamed
+  # and the file read under the new name. Ordinary writes must still work.
+  require_runtime_sandbox
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  local probe="$HOME/project/rename-probe.sh" mode
+  printf 'synthetic\n' > "$HOME/Library/Keychains/login.keychain-db"
+  cat > "$probe" <<'SH'
+#!/bin/sh
+mv "$HOME/Library" "$HOME/L2" 2>/dev/null && echo RENAMED-PARENT
+cat "$HOME/L2/Keychains/login.keychain-db" >/dev/null 2>&1 && echo READ-VIA-NEW-NAME
+mv "$HOME/Library/Keychains" "$HOME/Library/K2" 2>/dev/null && echo RENAMED-DIRECTORY
+: > "$HOME/Library/written" && echo WRITE-INSIDE-OK
+mkdir "$HOME/project/d" && mv "$HOME/project/d" "$HOME/project/e" && echo PROJECT-OK
+echo DONE
+SH
+  chmod +x "$probe"
+  for mode in "--allow $HOME/Library" "--strict --allow $HOME/Library"; do
+    # shellcheck disable=SC2086
+    run "$SCODE" $mode -C "$HOME/project" -- "$probe"
+    echo "$mode: $output"
+    [[ "$output" == *"DONE"* ]]
+    [[ "$output" != *"RENAMED-"* ]]
+    [[ "$output" != *"READ-VIA-NEW-NAME"* ]]
+    [[ "$output" == *"WRITE-INSIDE-OK"* ]]
+    [[ "$output" == *"PROJECT-OK"* ]]
+    [ -f "$HOME/Library/Keychains/login.keychain-db" ]
+    mv "$HOME/project/e" "$HOME/project/gone-$RANDOM"
+  done
 }

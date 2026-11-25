@@ -106,13 +106,13 @@ exists and is accessible; scode does not inspect that file. Explicit grants
 retain their documented precedence. See [security](security.md) for exposure
 and the exact access a manual `--allow` provides.
 
-`/usr/bin/security` remains executable inside the sandbox. `securityd`
-(`com.apple.SecurityServer`), `com.apple.securityd.xpc`, `com.apple.authd`, and the security agent names are
+`/usr/bin/security` remains executable inside the sandbox, and `securityd`
+(`com.apple.SecurityServer`) stays reachable for certificate loading. `com.apple.authd`, the security agent names, and `com.apple.securityd.xpc` are
 reachable only when the login-store grant is applied and
 `~/Library/Keychains/login.keychain-db` exists under the sandbox HOME. Otherwise
-the grant is not made, the profile ends with a deny of those Mach lookups, and
-keychain or authorization calls from the sandbox fail with an error and no
-dialog. An explicit `--allow` of the Keychains directory grants the files only.
+the grant is not made, the profile ends with a deny of those Mach lookups and of
+the login keychain directories, and a call that needs an authorization session
+fails with an error ([limits](security.md#keychain-services-on-macos)). An explicit `--allow` of the Keychains directory has no effect without the grant.
 scode does not initiate authentication or password dialogs. With the grant
 applied, a harness or macOS can still display one. See
 [keychain services](security.md#keychain-services-on-macos).

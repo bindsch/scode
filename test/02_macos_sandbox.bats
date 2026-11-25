@@ -111,7 +111,10 @@ wait_for_file() {
   run dry_run_cmd true
   [ "$status" -eq 0 ]
   [[ "$output" != *"carve-outs (read-only)"* ]]
-  [[ "$output" != *"$HOME/Library/Keychains"* ]]
+  # No allow names the directory; it appears only in the final deny.
+  local granted="${output%%"(deny mach-lookup"*}"
+  [[ "$granted" != *"$HOME/Library/Keychains"* ]]
+  [[ "$output" == *"(deny mach-lookup"*"(deny file-read* file-write*"*"(subpath \"$HOME/Library/Keychains\")"* ]]
 }
 
 @test "dry-run: --allow explicitly opens a Library subtree" {

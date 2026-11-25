@@ -7,7 +7,46 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.10] - 2026-11-25
+
+### Fixed
+
+- macOS: 0.6.9 denied `com.apple.SecurityServer` to every sandbox without the
+  applied login-store grant. Programs that load the system root certificates
+  through the keychain API (Codex, and anything built on `rustls-native-certs`)
+  open the certificate keychains through that service, so every HTTPS request
+  they made inside the sandbox failed ("error sending request"). 0.6.10 leaves
+  `com.apple.SecurityServer` reachable.
+
+### Security
+
+- The final Mach deny names `com.apple.authd`, `com.apple.security.agent`,
+  `com.apple.security.agent.login`, `com.apple.security.authhost`, and
+  `com.apple.securityd.xpc`. The dialog for a missing default keychain is
+  requested through an authorization session, which only `com.apple.authd`
+  makes; with it denied, `AuthorizationCreate` fails inside the sandbox.
+  securityd itself can still ask about a keychain file the sandbox can read
+  (see `docs/security.md`).
+- The profile now ends with a deny of the login keychain directories
+  (`~/Library/Keychains` under the run's HOME and under the account home) and
+  of every user keychain the preference file records as the default, the login
+  keychain or in the search list, each by every name its links give it. It is
+  the last file rule, so those keychain files and the daemon that decrypts
+  their items are never in the same sandbox without the login-store grant. A
+  path that cannot be resolved with certainty stops the launch.
+
+### Changed
+
+- `--allow "$HOME/Library/Keychains"` (or an `allowed:` entry, or a project
+  directory there) no longer gives the keychain files without the applied
+  login-store grant: the final deny overrides it. Use `--login-store` with an
+  eligible `claude` or `agy` launch.
+
 ## [0.6.9] - 2026-11-24
+
+**Correction:** this release denied `com.apple.SecurityServer` in every
+configuration without the applied login-store grant, which broke HTTPS for programs that load the system root
+certificates through the keychain API. It is withdrawn; use 0.6.10.
 
 ### Security
 

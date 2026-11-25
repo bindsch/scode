@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.9"
+readonly PROGRAM_VERSION="0.6.10"
 readonly DARWIN_STRICT_SYSTEM_PATHS=(/usr /opt /System /Library /private/var/db
   /private/var/run /private/var/select /private/etc /dev /bin /sbin /etc)
 readonly LINUX_SYSTEM_PATHS=(/usr /opt /lib /lib64 /bin /sbin /etc)
@@ -871,13 +871,16 @@ Strict Mode Auto-Allow:
   Keychain services: unless the grant is applied and
   ~/Library/Keychains/login.keychain-db exists as a file under the sandbox HOME,
   the grant is not made and every macOS profile ends with a deny of Mach lookups
-  for com.apple.SecurityServer, com.apple.securityd.xpc, com.apple.authd,
-  com.apple.security.agent, com.apple.security.agent.login, and
-  com.apple.security.authhost. Keychain and
-  authorization calls then fail with an error and no dialog; TLS trust
-  evaluation is unaffected. This holds for every command, in every mode.
-  Explicit --allow retains its file authority, but an --allow of the Keychains
-  directory does not make the services reachable.
+  for com.apple.authd, com.apple.security.agent,
+  com.apple.security.agent.login, com.apple.security.authhost, and
+  com.apple.securityd.xpc, and with a deny of the login keychain
+  directories. No authorization session can then be made, so the dialog for
+  a missing default keychain cannot be requested. This holds for every
+  command, in every mode. com.apple.SecurityServer stays reachable, because
+  programs load the system root certificates through it. An --allow of the
+  Keychains directory has no effect without the grant: that final deny
+  overrides it, so the files never come with the daemon that decrypts their
+  items.
   See docs/security.md for the exposure and precedence.
   Detection does not certify authentication compatibility.
   Use --block to suppress a specific auto-allow (e.g. --block ~/.claude).
@@ -5726,20 +5729,29 @@ KEYCHAIN_REACH=0
 KEYCHAIN_REACH_DECLINED=""
 LOGIN_STORE_KEYCHAINS="$HOME/Library/Keychains"
 LOGIN_STORE_PREFERENCES="$HOME/Library/Preferences/com.apple.security.plist"
-# The daemons behind every keychain and authorization dialog. securityd
-# (SecurityServer) and authd are the two a client talks to; the agent and
-# authhost names are denied as defense in depth. com.apple.securityd.xpc
-# serves the data-protection keychain: it refuses a command-line tool
-# without the entitlement, but a signed tool could use it, so it is denied
-# with the rest. HTTPS clients were checked with all six denied.
+# The services a client needs to put a keychain or authorization dialog on
+# screen. A dialog is requested through an authorization session, which
+# com.apple.authd makes: with authd denied, AuthorizationCreate fails
+# (measured: -60008) and "A keychain cannot be found to store ..." cannot be
+# asked for. The agent and authhost names are denied as defense in depth.
+# com.apple.securityd.xpc serves the data-protection keychain: it refuses a
+# command-line tool without the entitlement, but a signed tool could use it.
+readonly DARWIN_PLIST_READER="/usr/libexec/PlistBuddy"
 readonly DARWIN_KEYCHAIN_UI_SERVICES=(
-  com.apple.SecurityServer
-  com.apple.securityd.xpc
   com.apple.authd
   com.apple.security.agent
   com.apple.security.agent.login
   com.apple.security.authhost
+  com.apple.securityd.xpc
 )
+# securityd itself (com.apple.SecurityServer) is not denied. A program that
+# loads the system root certificates through the keychain API (Codex, and
+# anything built on rustls-native-certs) opens the certificate keychains
+# through it; scode 0.6.9 denied it and every HTTPS request such a program
+# made failed. What keeps the login keychain away from a sandbox without the
+# grant is a file rule instead: the last rule of the profile denies the
+# login keychain directories, so no --allow, project directory or link can
+# put the files and the daemon in the same sandbox.
 
 # Prints the keychain path the keychain preference file records under KEY
 # (DefaultKeychain or LoginKeychain), or nothing when it records none.
@@ -5893,16 +5905,162 @@ decide_keychain_reach() {
 # unfiltered allows scode emits ((allow default), strict (allow mach-lookup)) in
 # either order; only a later filtered Mach allow of the same name could reopen
 # it, and scode emits none. File rules, including --allow paths, cannot.
+# Every keychain path a sandbox without the grant must not read, by every
+# name that leads to it: the login keychain directory under HOME and the
+# account's own, and each user keychain the preference files record
+# (DefaultKeychain, LoginKeychain and the search list) wherever it lies.
+# The keychains of the system domain are left out: certificates are loaded
+# from them. Filled into LOGIN_KEYCHAIN_DIRECTORIES, not printed, because a
+# path may hold any character. Fails when a path cannot be resolved with
+# certainty; the caller then stops the launch.
+LOGIN_KEYCHAIN_DIRECTORIES=()
+login_keychain_directories() {
+  local source spelling known found prefs key index name base home_prefix system canonical probe variant recorded
+  # The login keychain file is listed beside its directory: when the file
+  # is a link, the file it leads to lies somewhere else.
+  local -a sources=("$LOGIN_STORE_KEYCHAINS" "$ACCOUNT_HOME/Library/Keychains"
+    "$LOGIN_STORE_KEYCHAINS/login.keychain-db" "$ACCOUNT_HOME/Library/Keychains/login.keychain-db")
+  local -a fixed=("${sources[@]}")
+  LOGIN_KEYCHAIN_DIRECTORIES=()
+  home_prefix=$'\176/'
+  for prefs in "$LOGIN_STORE_PREFERENCES" "$ACCOUNT_HOME/Library/Preferences/com.apple.security.plist"; do
+    # PlistBuddy is part of every macOS; a run that only simulates the
+    # platform elsewhere has no preferences. It reads the records on old
+    # releases too, where plutil has no -type query. A file that exists and
+    # cannot be read may record keychains this rule would miss: the launch
+    # stops.
+    [[ -f "$prefs" && -s "$prefs" && -x "$DARWIN_PLIST_READER" ]] || continue
+    [[ -r "$prefs" ]] || return 1
+    # A file that cannot be parsed is one Security.framework ignores.
+    "$DARWIN_PLIST_READER" -c "Print" "$prefs" >/dev/null 2>&1 || continue
+    for key in DefaultKeychain LoginKeychain DLDBSearchList; do
+      # Only an array records keychains. Every element is read, however
+      # many there are; an element without a DbName names no keychain.
+      probe="$("$DARWIN_PLIST_READER" -c "Print :$key" "$prefs" 2>/dev/null || true)"
+      [[ "$probe" == "Array {"* ]] || continue
+      index=0
+      while "$DARWIN_PLIST_READER" -c "Print :$key:$index" "$prefs" >/dev/null 2>&1; do
+        # The marker keeps a trailing newline that command substitution drops.
+        name="$("$DARWIN_PLIST_READER" -c "Print :$key:$index:DbName" "$prefs" 2>/dev/null && printf x)" || name=""
+        index=$((index + 1))
+        name="${name%x}"
+        name="${name%$'\n'}"
+        [[ -n "$name" ]] || continue
+        for base in "$HOME" "$ACCOUNT_HOME"; do
+          source="$name"
+          if [[ "$source" == "$home_prefix"* ]]; then
+            source="$base/${source#"$home_prefix"}"
+          elif [[ "$source" != /* ]]; then
+            # A relative name is read from the directory the command runs in.
+            source="$PROJECT_DIR/$source"
+          fi
+          # A name ending in .keychain may be opened as its -db file, and a
+          # -db name may have an older twin. A deny list names both: an
+          # extra deny costs nothing, a missing one leaves a keychain open.
+          variant=""
+          [[ "$source" == *.keychain ]] && variant="${source}-db"
+          [[ "$source" == *.keychain-db ]] && variant="${source%-db}"
+          if [[ "$source" == *[[:cntrl:]]* ]]; then
+            # The profile cannot carry such a name. With no file there, or
+            # at the -db name it can stand for, nothing needs the rule;
+            # with one, the launch stops.
+            [[ ! -e "$source" && ! -L "$source" ]] || return 1
+            [[ -z "$variant" || ( ! -e "$variant" && ! -L "$variant" ) ]] || return 1
+            continue
+          fi
+          # A keychain is a file. A recorded name that is a directory (the
+          # project, "/", a home) names none, and a rule for it would close
+          # everything beneath it.
+          [[ ! -d "$source" ]] || continue
+          sources+=("$source")
+          [[ -n "$variant" && ! -d "$variant" ]] && sources+=("$variant")
+        done
+      done
+    done
+  done
+  for source in "${sources[@]}"; do
+    path_link_spellings "$source" || return 1
+    # readlink output loses a trailing newline: a path that resolves to
+    # something else than the file system does is not trusted.
+    if [[ -e "$source" && ! "$source" -ef "$LINK_CANONICAL" ]]; then
+      return 1
+    fi
+    # A recorded keychain of the system domain stays readable: certificates
+    # are loaded from it. That is decided on the resolved path, without the
+    # Data-volume prefix, so no other spelling of a user file passes for one.
+    system=0
+    canonical="${LINK_CANONICAL#/System/Volumes/Data}"
+    case "$canonical" in
+      /Library/Keychains/*|/System/Library/Keychains/*|/Network/Library/Keychains/*) system=1 ;;
+    esac
+    for known in "${fixed[@]}"; do
+      [[ "$known" == "$source" ]] && system=0
+    done
+    [[ "$system" -eq 0 ]] || continue
+    recorded=1
+    for known in "${fixed[@]}"; do
+      [[ "$known" == "$source" ]] && recorded=0
+    done
+    for spelling in "${LINK_SPELLINGS[@]}"; do
+      # A recorded name can resolve to a directory (`/missing/..` is `/`).
+      # That is no keychain, and a rule for it would close everything
+      # beneath it.
+      if [[ "$recorded" -eq 1 && ( "$spelling" == "/" || -d "$spelling" ) ]]; then
+        continue
+      fi
+      found=0
+      for known in ${LOGIN_KEYCHAIN_DIRECTORIES[@]+"${LOGIN_KEYCHAIN_DIRECTORIES[@]}"}; do
+        [[ "$known" == "$spelling" ]] && found=1
+      done
+      [[ "$found" -eq 1 ]] || LOGIN_KEYCHAIN_DIRECTORIES+=("$spelling")
+    done
+  done
+}
+
 emit_macos_keychain_service_rule() {
-  local name
+  local name path escaped seen=$'\n'
   if [[ "$KEYCHAIN_REACH" == 1 ]]; then
     return 0
   fi
-  printf '\n; Keychain services (final): unreachable without an applied login-store grant\n'
-  printf '; and a resolvable login keychain. File grants do not reopen them.\n'
+  printf '\n; Keychain services (final): no authorization session can be made without an\n'
+  printf '; applied login-store grant and a resolvable login keychain, so the dialog for a\n'
+  printf '; missing default keychain cannot be requested. File grants do not reopen these.\n'
   printf '(deny mach-lookup\n'
   for name in "${DARWIN_KEYCHAIN_UI_SERVICES[@]}"; do
     printf '  (global-name "%s")\n' "$name"
+  done
+  printf ')\n'
+  printf '; The login keychain directories and the user keychains recorded in the\n'
+  printf '; preference file stay closed without the grant, whatever was allowed above:\n'
+  printf '; securityd is reachable, and the files must not be.\n'
+  printf '(deny file-read* file-write*\n'
+  login_keychain_directories || return 1
+  for path in "${LOGIN_KEYCHAIN_DIRECTORIES[@]}"; do
+    # A path the profile cannot carry stops the launch: a rule that was
+    # skipped or emptied would leave the directory open.
+    escaped="$(sbpl_escape "$path")" || return 1
+    [[ -n "$escaped" ]] || return 1
+    printf '  (subpath "%s")\n' "$escaped"
+  done
+  printf ')\n'
+  # The rule above names paths. Renaming a directory above one of them would
+  # give the files another name, so no such directory may be renamed or
+  # removed, whatever was allowed.
+  printf '(deny file-write-unlink\n'
+  for path in "${LOGIN_KEYCHAIN_DIRECTORIES[@]}"; do
+    path="${path%/*}"
+    while [[ -n "$path" ]]; do
+      case "$seen" in
+        *$'\n'"$path"$'\n'*) ;;
+        *)
+          seen="${seen}${path}"$'\n'
+          escaped="$(sbpl_escape "$path")" || return 1
+          [[ -n "$escaped" ]] || return 1
+          printf '  (literal "%s")\n' "$escaped"
+          ;;
+      esac
+      path="${path%/*}"
+    done
   done
   printf ')\n'
 }
@@ -5926,7 +6084,7 @@ if [[ "$PLATFORM" == "darwin" ]]; then
         fi
         info "${DETECTED_HARNESS}: allowing login store: ${LOGIN_STORE_KEYCHAINS} (read-write); ${LOGIN_STORE_PREFERENCES} (read-only when present); see docs/security.md for what that exposes"
       else
-        info "${DETECTED_HARNESS}: no automatic login-store grant: ${KEYCHAIN_REACH_DECLINED}; the sandbox does not reach the macOS Keychain (its services are denied and its files get no automatic grant; an explicit path grant gives files only and does not open the services), so a Keychain login is not available inside it; --login-store (or user login_store: true) grants ${LOGIN_STORE_KEYCHAINS} read-write and ${LOGIN_STORE_PREFERENCES} read-only when present, subject to eligibility, blocks, and an existing login.keychain-db; see docs/security.md for what that exposes"
+        info "${DETECTED_HARNESS}: no automatic login-store grant: ${KEYCHAIN_REACH_DECLINED}; the sandbox does not reach the macOS Keychain (no authorization session can be made in it and its keychain directory is closed; an explicit path grant of that directory has no effect), so a Keychain login is not available inside it; --login-store (or user login_store: true) grants ${LOGIN_STORE_KEYCHAINS} read-write and ${LOGIN_STORE_PREFERENCES} read-only when present, subject to eligibility, blocks, and an existing login.keychain-db; see docs/security.md for what that exposes"
       fi
       ;;
     *)
@@ -6537,7 +6695,10 @@ ${_identity_profile}"
   fi
 
   # Last rule of every macOS profile; see decide_keychain_reach.
-  _keychain_service_rule="$(emit_macos_keychain_service_rule)"
+  if ! _keychain_service_rule="$(emit_macos_keychain_service_rule)"; then
+    error "cannot write the keychain rule: a keychain path cannot be resolved or carried in the profile"
+    exit 1
+  fi
   if [[ -n "$_keychain_service_rule" ]]; then
     PROFILE="${PROFILE}
 ${_keychain_service_rule}"

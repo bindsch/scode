@@ -28,7 +28,7 @@ harness-specific state access, not a requirement to use a known harness.
 | `--keep-env NAME[,NAME...]` | Exempt exact valid names from scrubbing, preserving empty values; injection names remain refused |
 | `--no-credential-sync` | Compatibility no-op for 0.6.8; scode never reads, copies, checks, or changes a harness login |
 | `--login-store` | Opt in to macOS `claude`/`agy` login-store access; off by default; see the exposure below |
-| `--no-login-store` | Suppress login-store grants; wins over CLI/user opt-in regardless of order. Explicit path grants retain their file authority; keychain services stay denied |
+| `--no-login-store` | Suppress login-store grants; wins over CLI/user opt-in regardless of order. Explicit path grants retain their file authority, except for the login keychain directories and the user keychains the preference file records, which stay closed |
 | `--log FILE` | Replace FILE with private stderr capture; create missing parent directories |
 | `--dry-run` | Print generated policy/command without launching |
 
@@ -65,11 +65,13 @@ not inspect that file. See [security](security.md) for manual-grant precedence.
 
 Unless the grant is applied and `~/Library/Keychains/login.keychain-db` exists
 under the sandbox HOME, the grant is not made and every macOS profile ends with a
-deny of Mach lookups for `com.apple.SecurityServer`, `com.apple.securityd.xpc`, `com.apple.authd`,
-`com.apple.security.agent`, `com.apple.security.agent.login`, and
-`com.apple.security.authhost`. This applies to every command and mode. Keychain
-and authorization calls then fail with an error and no dialog. An explicit
-`--allow` of the Keychains directory grants the files only. See
+deny of Mach lookups for `com.apple.authd`, `com.apple.security.agent`, `com.apple.security.agent.login`, `com.apple.security.authhost`, and `com.apple.securityd.xpc`, and a deny of the login keychain directories. This
+applies to every command and mode. No authorization session can then be made, so a
+call that needs one fails with an error; that includes the store that would ask
+for a missing default keychain.
+`com.apple.SecurityServer` stays reachable; programs load the system root
+certificates through it. An explicit `--allow` of the Keychains directory has no
+effect without the grant. See
 [keychain services](security.md#keychain-services-on-macos).
 
 `--allow-staged` refuses symlinked base files. Its regex matches without regard

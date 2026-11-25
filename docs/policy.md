@@ -13,15 +13,16 @@ invariants in the precedence table.
 | HOME | Accessible except blocks | Only explicit and detected harness grants | Bound read-write except masks | Only explicit and detected harness grants |
 | Temporary storage | Shared paths remain reachable; private TMPDIR provided | Private per-run scratch; shared temp denied unless granted | Private `/tmp` tmpfs | Private `/tmp` tmpfs |
 | Detected harness state | Usually already reachable unless blocked | Automatic read-write grant | Usually already reachable unless blocked | Automatic read-write bind, only if it exists |
-| Runtime sockets | Subject to profile/host permissions; keychain services denied without the login-store grant | Broad Mach lookup remains, minus keychain services without the login-store grant | Validated XDG runtime directory when network is on | No automatic XDG runtime bind |
+| Runtime sockets | Subject to profile/host permissions; the authorization daemon and agents denied without the login-store grant (securityd stays reachable) | Broad Mach lookup remains, minus the authorization daemon and agents without the login-store grant (securityd stays reachable) | Validated XDG runtime directory when network is on | No automatic XDG runtime bind |
 
 macOS strict permits reads from `/usr`, `/opt`, `/System`, `/Library`,
 `/private/var/db`, `/private/var/run`, `/private/var/select`,
 `/private/etc`, `/dev`, `/bin`, `/sbin`, and `/etc`. It imports Apple's
 private `system.sb` and allows process execution/fork, sysctl reads, and Mach
 lookup. These are material runtime exceptions to deny-default. In both macOS
-modes the profile ends with a deny of Mach lookups for `com.apple.SecurityServer`,
-`com.apple.securityd.xpc`, `com.apple.authd`, and the security agent names unless the login-store grant is
+modes the profile ends with a deny of Mach lookups for `com.apple.authd`, the security agent names, and
+`com.apple.securityd.xpc`, and a deny of the login keychain directories
+(`com.apple.SecurityServer` stays reachable), unless the login-store grant is
 applied and `login.keychain-db` resolves; see
 [keychain services](security.md#keychain-services-on-macos). Strict mode
 also permits metadata-only reads (`file-read-metadata`) of the home and of
@@ -67,7 +68,7 @@ Path policy has separate rules; it is not a single last-option-wins list:
 | Project grant | Reopens a project inside a built-in blocked parent; built-in and custom blocks inside the project stay blocked in both modes; a custom block covering the project requires an authoritative read or read-write grant |
 | Internal command/preload grants | Cannot override retained custom blocks; the command exception applies only to default/platform blocks |
 | Automatic harness state | Read-write; skipped under `untrusted`, outside effective HOME after symlink resolution, or when blocked; built-in blocks inside state remain denied |
-| macOS login store | Off by default; `--login-store` or user `login_store: true` opts in; `--no-login-store`, `no_login_store: true`, `untrusted`, a custom block on either path, a missing `~/Library/Keychains/login.keychain-db`, or a default or login keychain recorded in `com.apple.security.plist` that is absent or outside `~/Library/Keychains`, or a preference file that cannot be read (see [security](security.md#keychain-services-on-macos)) suppresses the whole grant. Without the applied grant, Mach lookups of `com.apple.SecurityServer`, `com.apple.securityd.xpc`, `com.apple.authd`, and the security agent names are denied by the final rule; file allows do not reopen them |
+| macOS login store | Off by default; `--login-store` or user `login_store: true` opts in; `--no-login-store`, `no_login_store: true`, `untrusted`, a custom block on either path, a missing `~/Library/Keychains/login.keychain-db`, or a default or login keychain recorded in `com.apple.security.plist` that is absent or outside `~/Library/Keychains`, or a preference file that cannot be read (see [security](security.md#keychain-services-on-macos)) suppresses the whole grant. Without the applied grant, Mach lookups of `com.apple.authd`, the security agent names, and `com.apple.securityd.xpc` are denied by the final rule, and so are the login keychain directories; file allows do not reopen either |
 | Explicit child allow | Can reopen a child of a blocked parent; allowing a parent also covers descendants |
 | Grok mandatory blocks | Overlapping explicit allows are refused |
 | Final project read-only rule | `--ro` remains effective even with a broader writable grant |

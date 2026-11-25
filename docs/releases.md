@@ -60,9 +60,12 @@ provenance, and read-only preferences. Kernel tests read synthetic preferences
 and deny writes, replacement, and creation when absent. The keychain-services
 tests check that the final Mach deny is present in every configuration without
 an applied grant, and that lookups of every denied name
-(`com.apple.SecurityServer`, `com.apple.securityd.xpc`, `com.apple.authd`, and
-the security agent names) fail inside the sandbox while `com.apple.trustd` succeeds.
-They are passive: a bootstrap lookup sends no message to a daemon. Static checks
+(`com.apple.authd`, the security agent names, and `com.apple.securityd.xpc`)
+fail inside the sandbox while `com.apple.trustd` and `com.apple.SecurityServer`
+succeed, that no authorization session can be made there, and that a file in
+the login keychain directory cannot be read, whatever is allowed.
+A bootstrap lookup sends no message to a daemon; the authorization probe asks
+authd for a session with no rights, which shows nothing. Static checks
 reject credential commands in the launcher because its parent process pins
 PATH and cannot be intercepted by that spy.
 

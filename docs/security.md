@@ -12,7 +12,7 @@ connections, and open streams are the relevant authority.
 | Restrictive-only project config | All modes |
 | Ambient credential scrub | Explicit `--scrub-env`, untrusted preset, or detected Grok defense |
 | No automatic harness-state or Keychain grants | Untrusted preset |
-| macOS keychain services unreachable (no keychain or authorization dialog from the sandbox) | Every macOS run without an applied login-store grant and a resolvable login keychain |
+| No authorization session from the sandbox (the dialog for a missing default keychain cannot be requested) and the login keychain directories closed | Every macOS run without an applied login-store grant and a resolvable login keychain |
 | Read-only project | `--ro`, config `fs_mode: ro`, or untrusted preset |
 | IP network restriction | `--no-net`, config `net: off`, or untrusted preset |
 | Fixed engine lookup and closed nonstandard inherited descriptors | All launched runs |
@@ -46,10 +46,10 @@ project `no_login_store: true` can suppress it. Opt-outs win regardless of flag
 order. Without access, the harness cannot use a Keychain login. A sandboxed
 `claude` on macOS falls back to `~/.claude/.credentials.json` if one exists and is
 accessible; scode does not inspect that file or guard against an existing stale
-refresh token in it. Explicit `--allow` retains its documented file authority:
-`--allow "$HOME/Library/Keychains"` grants that directory read-write only; it does
-not grant the preference file, and it does not make the services reachable (see
-[keychain services](#keychain-services-on-macos)).
+refresh token in it. Explicit `--allow` retains its documented file authority, with one exception:
+`--allow "$HOME/Library/Keychains"`, or an `--allow` of a user keychain the
+preference file records, has no effect without the applied login-store grant,
+because the final rule of the profile denies those paths (see [keychain services](#keychain-services-on-macos)).
 `--allow-ro "$HOME/Library/Preferences/com.apple.security.plist"`
 grants that existing file read-only. Manual writable grants can exceed the
 login-store grant's restrictions.
@@ -73,11 +73,35 @@ scode therefore makes one decision per launch, "keychain reach: yes or no", and
 derives two rules from it:
 
 - the login-store file grant described above;
-- a final `(deny mach-lookup ...)` rule for the global names
-  `com.apple.SecurityServer` (securityd) and `com.apple.authd`, plus
-  `com.apple.securityd.xpc` (the data-protection keychain),
-  `com.apple.security.agent`, `com.apple.security.agent.login`, and
-  `com.apple.security.authhost` as defense in depth.
+- a final `(deny mach-lookup ...)` rule for the global name `com.apple.authd`,
+  plus `com.apple.security.agent`, `com.apple.security.agent.login`,
+  `com.apple.security.authhost`, and `com.apple.securityd.xpc` (the
+  data-protection keychain) as defense in depth, followed by a deny of the
+  login keychain directories.
+
+A dialog is requested through an authorization session, and only
+`com.apple.authd` makes one. With it denied, `AuthorizationCreate` fails inside
+the sandbox (measured: status -60008), so the request for "A keychain cannot be
+found to store ..." cannot be made.
+
+`com.apple.SecurityServer` (securityd) is left reachable on purpose. Programs
+that load the system root certificates through the keychain API, such as Codex
+and anything built on `rustls-native-certs`, open the certificate keychains
+through it, and all their HTTPS requests fail without it; scode 0.6.9 denied it
+and broke them. What keeps the login keychain away from a sandbox without the
+grant is a file rule instead. The last rule of the profile denies reads and
+writes of the login keychain directories: `~/Library/Keychains` under the HOME
+of the run and under the account home, by every name their links give them. It
+also denies each user keychain that `com.apple.security.plist` records as the
+default keychain, the login keychain or in the search list, wherever it lies;
+the keychains of the system domain are left readable, and a relative recorded
+name is read from the project directory. The records are read with `/usr/libexec/PlistBuddy`, which every macOS
+release has. A path that cannot be resolved with certainty, or that the profile
+cannot carry, stops the launch when a file exists there; a recorded name with a
+control character and no file is ignored, and so is one that names a directory. A recorded name ending in `.keychain` or
+`.keychain-db` closes both names. It comes after every allow, so no `--allow`, project directory or link can
+put the keychain files and the daemon that decrypts their items in the same
+sandbox.
 
 Keychain reach is yes only when the login-store grant is applied to the launched
 command and `~/Library/Keychains/login.keychain-db`, under the HOME scode exports
@@ -90,8 +114,10 @@ not exist stands for its `-db` file. An empty array means no such keychain and
 counts as no. So does a first element without a non-empty string `DbName`:
 macOS was observed to fall back to the login keychain there, but scode does not
 rely on that. A recorded name that contains a control character, or that is neither
-absolute nor `~/`-relative, counts as no. A preference file that cannot be read, or a macOS whose
-`plutil` cannot classify it (before macOS 12), also counts as no. A preference file macOS itself would ignore (unparsable, or a
+absolute nor `~/`-relative, counts as no. A macOS whose `plutil` cannot classify the file (before macOS 12) also counts
+as no. A non-empty preference file that cannot be read stops the launch for
+every command, with or without the grant: the final rule below must know which
+keychains the file records. A preference file macOS itself would ignore (unparsable, or a
 value that is not an array) records nothing. In every other case the file grant
 is not made and the profile ends with the deny. That covers the default, `--no-login-store`, a
 command that is not `claude` or `agy`, an ineligible target, `--trust untrusted`,
@@ -105,19 +131,41 @@ opt-in reports it for `claude` and `agy` launches.
 The deny is the last rule of the profile. Seatbelt lets a filtered `mach-lookup`
 deny win over the unfiltered allows scode emits (`(allow default)`, and
 `(allow mach-lookup)` in strict mode). Only a later filtered Mach allow of the
-same name could reopen it, and scode emits none. `--allow` paths are file rules:
-`--allow "$HOME/Library/Keychains"` without the login-store grant gives the files
-and does not make the services reachable.
+same name could reopen it, and scode emits none. The file deny that follows it
+is the last file rule, so an earlier allow of the same directory loses to it:
+`--allow "$HOME/Library/Keychains"` without the login-store grant gives nothing.
 
-With the deny in place, keychain and authorization calls made by any process in
-the sandbox fail with an error and no dialog: `security` subcommands, keyring
-libraries, `git-credential-osxkeychain`, keychain-held signing identities and
-client certificates, and `AuthorizationCopyRights`. TLS trust evaluation uses
-`com.apple.trustd`, which stays reachable. HTTPS requests were checked under the
-deny of all six names with curl, Node, Bun, Python, git, URLSession, and
-`uv --native-tls`. A tool
-that reads certificates or trust settings through the keychain services instead
-would fail with an error, not a dialog; none was found. With the grant
+With the deny in place, authorization calls made by any process in the sandbox
+fail with an error (`AuthorizationCreate`, and with it `AuthorizationCopyRights`),
+and so does a keychain call that needs one, such as the store that would ask to
+create a default keychain. The login keychain cannot be opened, because its
+files are hidden: `security` subcommands, keyring libraries and
+`git-credential-osxkeychain` get an error for it. TLS trust evaluation uses
+`com.apple.trustd`, which stays reachable. HTTPS requests were checked under
+these rules with curl, Node, Bun, Python, git, URLSession, `uv --native-tls`,
+and Codex.
+
+A non-empty preference file that cannot be read stops the launch as well,
+because it may record keychains the rule would miss.
+
+The rule names paths, so a second final rule denies renaming or removing every
+directory above one of them: a sandbox that was allowed to write a parent of the
+keychain directory (`--allow "$HOME/Library"`) cannot give the files another
+name.
+
+Limits of this rule. A keychain file that is neither in those directories nor
+recorded in the preference file is not known to scode and is readable wherever
+the sandbox can read; so is a hard link to a keychain file that already exists
+somewhere the sandbox can read. A sandboxed process can also send securityd
+requests that need no keychain file, such as locking every keychain of the
+login session, after which other applications ask for the password. scode 0.6.9
+prevented those and broke certificate loading; 0.6.10 does not prevent them.
+securityd can itself ask the owner about a keychain a
+sandboxed process can read and asks it to open, for example to unlock it. The
+login keychain is not readable there. A keychain file kept somewhere the
+sandbox can read is: one inside the project, and the System keychain
+(`/Library/Keychains/System.keychain`), which stays readable because
+administrator-installed root certificates are loaded from it. With the grant
 applied, the services are reachable, and a harness or macOS can display a
 dialog, for example an access-list confirmation for an item.
 
