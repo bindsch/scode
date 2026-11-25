@@ -36,7 +36,7 @@ Only CLI `--login-store` or user `login_store: true` enables the macOS
 path suppress the whole grant even after opt-in. `no_login_store: false` does
 not enable it. The invoked harness name must resolve to a regular executable
 outside the project; native version-number targets qualify, interpreter entry
-scripts and shell `-c` wrappers do not.
+scripts and shell `-c` wrappers do not. A harness run as `/usr/bin/env HOME=... XDG_*_HOME=... /absolute/path` qualifies as well (see [security](security.md)).
 
 The grant makes `~/Library/Keychains` read-write so the harness can refresh its
 own item, and `~/Library/Preferences/com.apple.security.plist` read-only when

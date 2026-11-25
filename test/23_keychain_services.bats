@@ -811,3 +811,162 @@ SH
     mv "$HOME/project/e" "$HOME/project/gone-$RANDOM"
   done
 }
+
+@test "keychain services: a harness run through env with only home assignments is eligible; any other wrapper is not" {
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  require_node
+  # codemux launches agy as `/usr/bin/env HOME=<private> XDG_*_HOME=... <agy>`.
+  # 0.6.9 and earlier declined that as a wrapper, and the caller reached the
+  # keychain through an explicit --allow, which the final rule now overrides.
+  # The harness lies outside the project in every case, so the wrapper rule
+  # is the only thing that can decline it.
+  local harness="$TEST_PROJECT/bin/agy" private="$TEST_PROJECT/private" odd="$TEST_PROJECT/a=b"
+  mkdir -p "$TEST_PROJECT/bin" "$private/Library" "$odd"
+  cp /usr/bin/true "$harness"; cp /usr/bin/true "$odd/agy"
+  ln -s "$HOME/Library/Keychains" "$private/Library/Keychains"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$private" \
+    "XDG_CONFIG_HOME=$private/.config" "XDG_CACHE_HOME=$private/.cache" "XDG_DATA_HOME=$private/.local/share" \
+    "XDG_STATE_HOME=$private/.local/state" "$harness" --flag
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  [[ "$output" != *"(deny mach-lookup"* ]]
+  # Without the opt-in it is declined like any other launch.
+  run "$SCODE" --dry-run -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"(deny mach-lookup"* ]]
+  # A HOME that does not lead to the login keychain leaves the harness
+  # without a default keychain: declined, with the reason.
+  mkdir -p "$TEST_PROJECT/bare"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$TEST_PROJECT/bare" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"does not lead to the login keychain"* ]]
+  [[ "$output" == *"(deny mach-lookup"* ]]
+  # A private home with its own keychain preference file is declined (its
+  # records were not judged); a link to the judged file is accepted.
+  mkdir -p "$private/Library/Preferences" "$HOME/Library/Preferences"
+  printf 'x' > "$private/Library/Preferences/com.apple.security.plist"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"has its own keychain preference file"* ]]
+  [[ "$output" == *"(deny mach-lookup"* ]]
+  rm -f "$private/Library/Preferences/com.apple.security.plist"
+  /usr/bin/plutil -create xml1 "$HOME/Library/Preferences/com.apple.security.plist"
+  ln -s "$HOME/Library/Preferences/com.apple.security.plist" "$private/Library/Preferences/com.apple.security.plist"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  rm -f "$private/Library/Preferences/com.apple.security.plist" "$HOME/Library/Preferences/com.apple.security.plist"
+  # With the grant, the preference path of the harness's HOME is closed to
+  # writes: the harness cannot record another default keychain afterward.
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  [[ "$output" == *"(deny file-write*"*"(literal \"$private/Library/Preferences/com.apple.security.plist\")"* ]]
+  [[ "$output" == *"(deny file-write-unlink"*"(literal \"$private/Library\")"* ]]
+  # Preferences does not exist in this home: it may not be created (as a
+  # link to somewhere writable), and the Keychains link may not be removed.
+  [[ "$output" == *"(deny file-write*"*"(literal \"$private/Library/Preferences\")"* ]]
+  [[ "$output" == *"(deny file-write-unlink"*"(literal \"$private/Library/Keychains\")"* ]]
+  # Reached through a link, the path is closed under every name it has.
+  ln -s "$private" "$TEST_PROJECT/alias-home"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$TEST_PROJECT/alias-home" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  [[ "$output" == *"(literal \"$TEST_PROJECT/alias-home/Library/Preferences/com.apple.security.plist\")"* ]]
+  [[ "$output" == *"(literal \"$private/Library/Preferences/com.apple.security.plist\")"* ]]
+  # A private Keychains directory of its own that only links the login
+  # file is not the judged directory: a recorded ~/Library/Keychains/<name>
+  # would be another file there.
+  mkdir -p "$TEST_PROJECT/partial/Library/Keychains"
+  ln -s "$HOME/Library/Keychains/login.keychain-db" "$TEST_PROJECT/partial/Library/Keychains/login.keychain-db"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$TEST_PROJECT/partial" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"does not lead to the login keychain"* ]]
+  # A block over the harness's HOME hides the keychain that was judged.
+  run "$SCODE" --dry-run --login-store --block "$private" -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"a block covers the keychain path under the HOME given to the harness"* ]]
+  [[ "$output" == *"(deny mach-lookup"* ]]
+  # A HOME with a control character is declined and never echoed.
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=/nonexistent/"$'\033'"]0;x" "$harness"
+  [[ "$output" == *"contains a control character"* ]]
+  [[ "$output" != *$'\033'"]0;x"* ]]
+  # Each of these stays ineligible: another assignment, an env option, a
+  # relative harness path, a bare env, a path env would read as an
+  # assignment, and a shell wrapper.
+  local n=0
+  check_ineligible() {
+    n=$((n + 1))
+    run "$SCODE" --dry-run --login-store -C "$HOME/project" -- "$@"
+    echo "$n: $status $*"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"allowing login store"* ]]
+    [[ "$output" == *"(deny mach-lookup"* ]]
+  }
+  check_ineligible /usr/bin/env "HOME=$private" DYLD_INSERT_LIBRARIES=/x "$harness"
+  check_ineligible /usr/bin/env -i "HOME=$private" "$harness"
+  check_ineligible /usr/bin/env "$harness"
+  check_ineligible /usr/bin/env "HOME=$private" "$odd/agy" /bin/sh
+  check_ineligible /bin/sh -c "$harness"
+  # A link that resolves into a directory with "=" in its name: the
+  # resolved path would be read by env as an assignment.
+  ln -s "$odd" "$TEST_PROJECT/tools"
+  check_ineligible /usr/bin/env "HOME=$private" "$TEST_PROJECT/tools/agy" /bin/sh
+  # An empty or relative HOME is no home the keychain was checked under.
+  check_ineligible /usr/bin/env "HOME=" "$harness"
+  (cd "$TEST_PROJECT" && check_ineligible /usr/bin/env "HOME=private" "$harness")
+  # Home assignments without HOME itself leave the judged HOME in force.
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "XDG_CONFIG_HOME=$private/.config" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  (cd "$TEST_PROJECT" && check_ineligible /usr/bin/env "HOME=$private" bin/agy)
+  # A harness inside the project stays ineligible through env too.
+  mkdir -p "$HOME/project/bin"; cp /usr/bin/true "$HOME/project/bin/agy"
+  check_ineligible /usr/bin/env "HOME=$private" "$HOME/project/bin/agy"
+}
+
+@test "keychain services kernel: env runs the judged harness binary, and the grant reaches the keychain through the private home" {
+  require_runtime_sandbox
+  [[ "$(uname -s)" == "Darwin" ]] || skip "macOS only"
+  local harness="$TEST_PROJECT/bin/agy" private="$TEST_PROJECT/private"
+  mkdir -p "$TEST_PROJECT/bin" "$private/Library"
+  printf 'synthetic\n' > "$HOME/Library/Keychains/login.keychain-db"
+  ln -s "$HOME/Library/Keychains" "$private/Library/Keychains"
+  # A stand-in harness: a compiled program that reads the keychain file
+  # under its own HOME and reports what HOME it was given.
+  command -v cc >/dev/null 2>&1 || skip "C compiler unavailable"
+  cat > "$TEST_PROJECT/agy.c" <<'C'
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
+int main(void) {
+  char path[4096];
+  const char *home = getenv("HOME");
+  snprintf(path, sizeof path, "%s/Library/Keychains/login.keychain-db", home ? home : "");
+  FILE *file = fopen(path, "rb");
+  printf("HOME=%s KEYCHAIN=%s\n", home ? home : "", file ? "readable" : "unreadable");
+  /* What a harness could try after the grant: make the missing Preferences
+     directory a link to somewhere writable, or swap the Keychains link. */
+  snprintf(path, sizeof path, "%s/Library/Preferences", home ? home : "");
+  printf("PREFERENCES-LINK=%s\n", symlink("/tmp", path) == 0 ? "created" : "denied");
+  printf("PREFERENCES-DIR=%s\n", mkdir(path, 0700) == 0 ? "created" : "denied");
+  snprintf(path, sizeof path, "%s/Library/Keychains", home ? home : "");
+  printf("KEYCHAINS-UNLINK=%s\n", unlink(path) == 0 ? "removed" : "denied");
+  return 0;
+}
+C
+  cc -o "$harness" "$TEST_PROJECT/agy.c" >/dev/null 2>&1 || skip "cannot compile the stand-in harness"
+  run "$SCODE" --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"HOME=$private KEYCHAIN=readable"* ]]
+  [[ "$output" == *"PREFERENCES-LINK=denied"* ]]
+  [[ "$output" == *"PREFERENCES-DIR=denied"* ]]
+  [[ "$output" == *"KEYCHAINS-UNLINK=denied"* ]]
+  [ -L "$private/Library/Keychains" ]
+  [ ! -e "$private/Library/Preferences" ]
+  # Without the opt-in the same launch cannot read it.
+  run "$SCODE" -C "$HOME/project" -- /usr/bin/env "HOME=$private" "$harness"
+  [[ "$output" == *"KEYCHAIN=unreadable"* ]]
+}

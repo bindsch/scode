@@ -20,13 +20,24 @@ connections, and open streams are the relevant authority.
 Default mode exposes harness state and ambient environment credentials unless
 separately restricted. Strict mode grants detected harness state read-write.
 On macOS, login-store access is off by default. `--login-store` or user-config
-`login_store: true` opts in for directly launched `claude` and `agy` in normal and
+`login_store: true` opts in for `claude` and `agy`, launched directly or through the env form described below, in normal and
 strict modes. `~/Library/Keychains` becomes read-write so the harness can rewrite
 its own item when its token refreshes. `~/Library/Preferences/com.apple.security.plist`
 is read-only when it exists; the grant never permits creating it when absent.
 The invoked name must be the harness name (optionally `.exe`), resolving to a
 regular executable outside the project. Native version-number targets and
-Homebrew `bin/claude.exe` targets qualify. Interpreter entry scripts and shell
+Homebrew `bin/claude.exe` targets qualify. So does a harness run through
+`/usr/bin/env` when env is given nothing but `HOME` and `XDG_*_HOME`
+assignments followed by the harness's absolute path (one without `=`), which is
+how a caller gives the harness a private home. A `HOME` given there must be an
+absolute path whose `Library/Keychains` is the same directory, with the same
+`login.keychain-db`, must hold no
+keychain preference file of its own (none, or a link to the same file), and must
+not lie under a block; the profile then denies writing that preference path,
+creating a missing directory above it, and removing the `Keychains` entry; the resolved binary
+path must not hold `=` either; env then runs that resolved binary; and in strict
+mode the caller grants the harness executable itself, as for any wrapped
+command. Interpreter entry scripts and shell
 `-c` wrappers do not. Redirected login-store paths are declined.
 Both modes report the granted paths. Every process in that sandbox can read
 Keychain items whose access list trusts `/usr/bin/security` without a dialog.

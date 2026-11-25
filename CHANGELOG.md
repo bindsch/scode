@@ -37,6 +37,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Changed
 
+- The login-store grant now applies to a `claude` or `agy` binary launched as
+  `/usr/bin/env HOME=... XDG_*_HOME=... /absolute/path/to/harness`. Until now
+  that form was declined as a wrapper, and callers that give the harness a
+  private home this way (codemux, for agy) reached the keychain only through an
+  explicit `--allow` of the Keychains directory, which no longer gives the
+  files. Any other env argument keeps the launch ineligible.
 - `--allow "$HOME/Library/Keychains"` (or an `allowed:` entry, or a project
   directory there) no longer gives the keychain files without the applied
   login-store grant: the final deny overrides it. Use `--login-store` with an

@@ -75,8 +75,8 @@ Existing `~/.claude/.credentials.json` files and backups under
 `~/Library/Application Support/scode/credential-backups` are left alone.
 
 Login-store access is off by default. `--login-store` or user-config
-`login_store: true` opts in for normal and strict macOS runs directly launching
-`claude` or `agy`. `~/Library/Keychains` becomes read-write so the harness can
+`login_store: true` opts in for normal and strict macOS runs that launch
+`claude` or `agy` directly or through the env form below. `~/Library/Keychains` becomes read-write so the harness can
 rewrite its own item when its token refreshes.
 `~/Library/Preferences/com.apple.security.plist` is read-only when it exists;
 creating it when absent is denied. Every process in that sandbox can read
@@ -93,7 +93,9 @@ The invoked name must be `claude` or `agy` (optionally `.exe`) and its resolved
 target must be a regular executable outside the project. Native installs such as
 `~/.local/bin/claude -> ~/.local/share/claude/versions/2.0.99` and Homebrew targets
 ending in `bin/claude.exe` qualify. Interpreter entry scripts and wrappers,
-including shell `-c` strings, do not qualify. A declined grant reports
+including shell `-c` strings, do not qualify, with one exception: the harness
+run as `/usr/bin/env` with nothing but `HOME` and `XDG_*_HOME` assignments and
+then its absolute path, the form a caller uses to give it a private home. A declined grant reports
 the reason and both paths with their access modes. Redirected login-store paths
 are not automatically granted. Both normal and strict modes report granted paths.
 `--no-login-store` (user config: `no_login_store: true`), an overlapping `--block`,
@@ -109,7 +111,9 @@ and the exact access a manual `--allow` provides.
 `/usr/bin/security` remains executable inside the sandbox, and `securityd`
 (`com.apple.SecurityServer`) stays reachable for certificate loading. `com.apple.authd`, the security agent names, and `com.apple.securityd.xpc` are
 reachable only when the login-store grant is applied and
-`~/Library/Keychains/login.keychain-db` exists under the sandbox HOME. Otherwise
+`~/Library/Keychains/login.keychain-db` exists under the sandbox HOME (for a
+harness given another HOME through env, that HOME's `Library/Keychains` must be the same directory;
+see [security](security.md)). Otherwise
 the grant is not made, the profile ends with a deny of those Mach lookups and of
 the login keychain directories, and a call that needs an authorization session
 fails with an error ([limits](security.md#keychain-services-on-macos)). An explicit `--allow` of the Keychains directory has no effect without the grant.

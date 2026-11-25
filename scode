@@ -5727,6 +5727,7 @@ _auto_allowed=()
 # login tool.
 KEYCHAIN_REACH=0
 KEYCHAIN_REACH_DECLINED=""
+KEYCHAIN_CHILD_PREFERENCES=""
 LOGIN_STORE_KEYCHAINS="$HOME/Library/Keychains"
 LOGIN_STORE_PREFERENCES="$HOME/Library/Preferences/com.apple.security.plist"
 # The services a client needs to put a keychain or authorization dialog on
@@ -5809,20 +5810,52 @@ decide_keychain_reach() {
       return 0
       ;;
   esac
+  # The launcher is the command itself, or the absolute path that
+  # /usr/bin/env runs after nothing but the home assignments a caller uses
+  # to give the harness a private home (codemux launches agy this way).
+  # Any other env argument, and any other wrapper, keeps the launch
+  # ineligible: the word after it is then judged as the wrapper it is.
+  local launcher="${REQUESTED_COMMAND[0]}" binary="$COMMAND_BINARY_PATH" word="" at=1
+  local wrapped_at=0 child_home="" child_home_set=0
+  if [[ "$COMMAND_BINARY_PATH" == /usr/bin/env ]]; then
+    while (( at < ${#REQUESTED_COMMAND[@]} )); do
+      word="${REQUESTED_COMMAND[$at]}"
+      case "$word" in
+        HOME=*) child_home="${word#HOME=}"; child_home_set=1; at=$((at + 1)) ;;
+        XDG_CONFIG_HOME=*|XDG_CACHE_HOME=*|XDG_DATA_HOME=*|XDG_STATE_HOME=*) at=$((at + 1)) ;;
+        *) break ;;
+      esac
+    done
+    word="${REQUESTED_COMMAND[$at]:-}"
+    # env reads any word with "=" as an assignment, so a path that holds
+    # one would not be the command env runs.
+    if [[ "$at" -gt 1 && "$word" == /* && "$word" != *=* && -e "$word" ]]; then
+      launcher="$word"
+      binary="$(_realpath "$word" 2>/dev/null)" || binary=""
+      wrapped_at="$at"
+      # The resolved path takes the word's place in env's arguments, so it
+      # must not hold "=" either (a link can lead into such a directory).
+      if [[ -z "$binary" || "$binary" == *=* ]]; then
+        launcher="${REQUESTED_COMMAND[0]}"
+        binary="$COMMAND_BINARY_PATH"
+        wrapped_at=0
+      fi
+    fi
+  fi
   if [[ "$NO_LOGIN_STORE" == 1 ]]; then
     declined="--no-login-store or no_login_store: true is set"
   elif [[ "$LOGIN_STORE" != 1 ]]; then
     declined="login-store access is off by default"
   elif [[ "$CLI_TRUST" == untrusted ]]; then
     declined="--trust untrusted disables automatic grants"
-  elif [[ "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS" &&
-          "${REQUESTED_COMMAND[0]##*/}" != "$DETECTED_HARNESS.exe" ]]; then
+  elif [[ "${launcher##*/}" != "$DETECTED_HARNESS" &&
+          "${launcher##*/}" != "$DETECTED_HARNESS.exe" ]]; then
     declined="the invoked name is not the harness launcher (entry scripts and wrappers are ineligible)"
-  elif [[ -z "$COMMAND_BINARY_PATH" || ! -f "$COMMAND_BINARY_PATH" || ! -x "$COMMAND_BINARY_PATH" ]]; then
+  elif [[ -z "$binary" || ! -f "$binary" || ! -x "$binary" ]]; then
     declined="the harness target is not a regular executable"
-  elif [[ "$(dd if="$COMMAND_BINARY_PATH" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" == 2321 ]]; then
+  elif [[ "$(dd if="$binary" bs=2 count=1 2>/dev/null | od -An -tx1 | tr -d '[:space:]')" == 2321 ]]; then
     declined="the resolved harness target is an interpreter entry script (entry scripts and wrappers are ineligible)"
-  elif is_same_or_descendant_path "$COMMAND_BINARY_PATH" "$PROJECT_DIR"; then
+  elif is_same_or_descendant_path "$binary" "$PROJECT_DIR"; then
     declined="the resolved harness executable is inside the project"
   fi
   if [[ -z "$declined" ]]; then
@@ -5894,9 +5927,61 @@ decide_keychain_reach() {
       fi
     done
   fi
+  if [[ -z "$declined" && "$wrapped_at" -gt 0 && "$child_home_set" -eq 1 ]]; then
+    # The harness runs with another HOME than the one judged above. It has
+    # a default keychain only if that HOME leads to the same login keychain
+    # (a caller links the directory into a private home). An empty HOME
+    # leads nowhere, and a relative one would be read from another
+    # directory once the command runs.
+    if [[ "$child_home" != /* ]]; then
+      declined="the HOME given to the harness is not an absolute path"
+    elif [[ "$child_home" == *[[:cntrl:]]* ]]; then
+      # Never echoed: the value could carry terminal control sequences.
+      declined="the HOME given to the harness contains a control character"
+    elif [[ ! "$child_home/Library/Keychains" -ef "$LOGIN_STORE_KEYCHAINS" ||
+            ! "$child_home/Library/Keychains/login.keychain-db" -ef "$LOGIN_STORE_KEYCHAINS/login.keychain-db" ]]; then
+      # The whole directory, not only the login file: a keychain the
+      # preference file records as ~/Library/Keychains/<name> must be the
+      # same file from either HOME.
+      declined="the HOME given to the harness does not lead to the login keychain: ${child_home}"
+    elif [[ ( -e "$child_home/Library/Preferences/com.apple.security.plist" ||
+              -L "$child_home/Library/Preferences/com.apple.security.plist" ) &&
+            ! "$child_home/Library/Preferences/com.apple.security.plist" -ef "$LOGIN_STORE_PREFERENCES" ]]; then
+      # The records judged above are those of the outer HOME. A preference
+      # file of its own in the harness's HOME could record another default
+      # keychain, or none.
+      declined="the HOME given to the harness has its own keychain preference file: ${child_home}"
+    else
+      # A block over the harness's HOME hides the way to the keychain that
+      # was judged, although no block covers the keychain itself.
+      # Blocks are stored resolved, so the home is compared resolved too;
+      # the two entries beneath it are named, not followed (the Keychains
+      # entry is a link to the judged directory).
+      resolved="$(_realpath "$child_home" 2>/dev/null)" || resolved="$child_home"
+      for block in ${RESOLVED_CLI_BLOCKED[@]+"${RESOLVED_CLI_BLOCKED[@]}"} \
+          ${RESOLVED_CONFIG_BLOCKED[@]+"${RESOLVED_CONFIG_BLOCKED[@]}"} \
+          ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
+        if paths_overlap_hierarchy "$resolved/Library/Keychains" "$block" ||
+            paths_overlap_hierarchy "$resolved/Library/Preferences/com.apple.security.plist" "$block"; then
+          declined="a block covers the keychain path under the HOME given to the harness: ${block}"
+          break
+        fi
+      done
+    fi
+  fi
   KEYCHAIN_REACH_DECLINED="$declined"
   if [[ -z "$declined" ]]; then
     KEYCHAIN_REACH=1
+    # env must run the object that was judged, as a direct launch does: a
+    # link replaced after this point would run something else with the grant.
+    if [[ "$wrapped_at" -gt 0 && "${DRY_RUN}" -ne 1 ]]; then
+      COMMAND[wrapped_at]="$binary"
+    fi
+    # The harness must not write a preference file into its own HOME after
+    # the records were judged; the final rule closes that path.
+    if [[ "$wrapped_at" -gt 0 && "$child_home_set" -eq 1 ]]; then
+      KEYCHAIN_CHILD_PREFERENCES="$child_home/Library/Preferences/com.apple.security.plist"
+    fi
   fi
   return 0
 }
@@ -6020,6 +6105,59 @@ login_keychain_directories() {
 emit_macos_keychain_service_rule() {
   local name path escaped seen=$'\n'
   if [[ "$KEYCHAIN_REACH" == 1 ]]; then
+    if [[ -n "$KEYCHAIN_CHILD_PREFERENCES" ]]; then
+      # Every name the path has, since the kernel matches the resolved one,
+      # and no directory above it may be renamed or removed to give the
+      # path another meaning.
+      path_link_spellings "$KEYCHAIN_CHILD_PREFERENCES" || return 1
+      printf '\n; The keychain preference path of the HOME given to the harness: it was\n'
+      printf '; judged absent or linked, and must stay so.\n'
+      printf '(deny file-write*\n'
+      for path in "${LINK_SPELLINGS[@]}"; do
+        escaped="$(sbpl_escape "$path")" || return 1
+        [[ -n "$escaped" ]] || return 1
+        printf '  (literal "%s")\n' "$escaped"
+        # A directory above the file that does not exist yet could be made
+        # as a link to somewhere writable: it may not be created at all.
+        path="${path%/*}"
+        while [[ -n "$path" && ! -e "$path" && ! -L "$path" ]]; do
+          escaped="$(sbpl_escape "$path")" || return 1
+          [[ -n "$escaped" ]] || return 1
+          printf '  (literal "%s")\n' "$escaped"
+          path="${path%/*}"
+        done
+      done
+      printf ')\n'
+      printf '(deny file-write-unlink\n'
+      # The Keychains entry of that HOME is the link that was judged: it may
+      # not be removed and replaced either.
+      for path in "${LINK_SPELLINGS[@]}"; do
+        # Under every name the home has, as for the preference path.
+        case "$path" in
+          */Library/Preferences/com.apple.security.plist)
+            escaped="$(sbpl_escape "${path%/Preferences/*}/Keychains")" || return 1
+            [[ -n "$escaped" ]] || return 1
+            printf '  (literal "%s")\n' "$escaped"
+            ;;
+        esac
+      done
+      for path in "${LINK_SPELLINGS[@]}"; do
+        path="${path%/*}"
+        while [[ -n "$path" ]]; do
+          case "$seen" in
+            *$'\n'"$path"$'\n'*) ;;
+            *)
+              seen="${seen}${path}"$'\n'
+              escaped="$(sbpl_escape "$path")" || return 1
+              [[ -n "$escaped" ]] || return 1
+              printf '  (literal "%s")\n' "$escaped"
+              ;;
+          esac
+          path="${path%/*}"
+        done
+      done
+      printf ')\n'
+    fi
     return 0
   fi
   printf '\n; Keychain services (final): no authorization session can be made without an\n'

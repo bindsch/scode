@@ -51,7 +51,7 @@ read-write so the harness can refresh its own item, and
 on either path suppresses the whole grant. Project config cannot enable it.
 The invoked harness name must resolve to a regular executable outside the
 project; version-number targets qualify, interpreter entry scripts and shell
-`-c` wrappers do not.
+`-c` wrappers do not. A harness run as `/usr/bin/env HOME=... XDG_*_HOME=... /absolute/path` qualifies as well (see [security](security.md)).
 
 Every process in an enabled sandbox can read Keychain items whose access list
 trusts `/usr/bin/security` without a dialog, including the harness login with its

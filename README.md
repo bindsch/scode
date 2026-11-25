@@ -36,7 +36,9 @@ The grant makes `~/Library/Keychains` read-write so the harness can refresh its
 own item. `~/Library/Preferences/com.apple.security.plist` is read-only when it
 exists. The invoked name must be the harness name (optionally `.exe`), resolving
 to a regular executable outside the project. Native version-number targets
-qualify; interpreter entry scripts and shell `-c` wrappers do not.
+qualify; interpreter entry scripts and shell `-c` wrappers do not. A harness
+run as `/usr/bin/env HOME=... XDG_*_HOME=... /absolute/path` qualifies as well
+(see [security](docs/security.md)).
 Both modes report the granted paths.
 Every process in that sandbox can read Keychain items whose access list trusts
 `/usr/bin/security` without a dialog. This includes the harness's login and
