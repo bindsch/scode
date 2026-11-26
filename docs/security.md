@@ -33,7 +33,8 @@ how a caller gives the harness a private home. A `HOME` given there must be an
 absolute path whose `Library/Keychains` is the same directory, with the same
 `login.keychain-db`, must hold no
 keychain preference file of its own (none, or a link to the same file), and must
-not lie under a block; the profile then denies writing that preference path,
+not lie under a block (except a block that a command-line `--allow` strictly
+inside it reopens at or above that home); the profile then denies writing that preference path,
 creating a missing directory above it, and removing the `Keychains` entry; the resolved binary
 path must not hold `=` either; env then runs that resolved binary; and in strict
 mode the caller grants the harness executable itself, as for any wrapped

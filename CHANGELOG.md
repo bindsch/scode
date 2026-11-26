@@ -7,6 +7,20 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.6.11] - 2026-11-26
+
+### Fixed
+
+- macOS: 0.6.10 declined the login-store grant for a harness run through
+  `/usr/bin/env HOME=<private> ...` whenever a `--block` covered that private
+  home, also when an `--allow` reopened the home inside the block. Callers
+  that block a harness's store and allow the private home they made in it
+  (codemux, for `agy` with `--tools none`, sessions and hermetic runs) lost
+  the keychain login. A block above the home no longer declines when a
+  command-line `--allow` strictly inside that block covers the home. Every
+  other case still declines: no such grant, a grant from a config file, a
+  read-only grant, or a block at or inside the home's keychain path.
+
 ## [0.6.10] - 2026-11-25
 
 ### Fixed

@@ -49,7 +49,7 @@ fi
 readonly ACCOUNT_HOME
 
 readonly PROGRAM_NAME="scode"
-readonly PROGRAM_VERSION="0.6.10"
+readonly PROGRAM_VERSION="0.6.11"
 readonly DARWIN_STRICT_SYSTEM_PATHS=(/usr /opt /System /Library /private/var/db
   /private/var/run /private/var/select /private/etc /dev /bin /sbin /etc)
 readonly LINUX_SYSTEM_PATHS=(/usr /opt /lib /lib64 /bin /sbin /etc)
@@ -5816,7 +5816,7 @@ decide_keychain_reach() {
   # Any other env argument, and any other wrapper, keeps the launch
   # ineligible: the word after it is then judged as the wrapper it is.
   local launcher="${REQUESTED_COMMAND[0]}" binary="$COMMAND_BINARY_PATH" word="" at=1
-  local wrapped_at=0 child_home="" child_home_set=0
+  local wrapped_at=0 child_home="" child_home_set=0 reopened=0 grant=""
   if [[ "$COMMAND_BINARY_PATH" == /usr/bin/env ]]; then
     while (( at < ${#REQUESTED_COMMAND[@]} )); do
       word="${REQUESTED_COMMAND[$at]}"
@@ -5963,8 +5963,25 @@ decide_keychain_reach() {
           ${RESOLVED_PROJECT_BLOCKED[@]+"${RESOLVED_PROJECT_BLOCKED[@]}"}; do
         if paths_overlap_hierarchy "$resolved/Library/Keychains" "$block" ||
             paths_overlap_hierarchy "$resolved/Library/Preferences/com.apple.security.plist" "$block"; then
-          declined="a block covers the keychain path under the HOME given to the harness: ${block}"
-          break
+          # A block above the home that a command-line --allow reopens at
+          # or above the home hides nothing: callers block a harness's
+          # store and allow the private home they made inside it. Only a
+          # command-line read-write grant strictly inside the block counts:
+          # it survives a block from any source, where a user-config grant
+          # can be dropped under a command-line block. Any other grant
+          # leaves the run declined, which keeps the services closed.
+          reopened=0
+          if is_descendant_path "$resolved" "$block"; then
+            for grant in ${RESOLVED_CLI_ALLOWED[@]+"${RESOLVED_CLI_ALLOWED[@]}"}; do
+              if is_same_or_descendant_path "$resolved" "$grant" && is_descendant_path "$grant" "$block"; then
+                reopened=1
+              fi
+            done
+          fi
+          if [[ "$reopened" -eq 0 ]]; then
+            declined="a block covers the keychain path under the HOME given to the harness: ${block}"
+            break
+          fi
         fi
       done
     fi

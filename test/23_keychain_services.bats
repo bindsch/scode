@@ -887,6 +887,44 @@ SH
   [ "$status" -eq 0 ]
   [[ "$output" == *"a block covers the keychain path under the HOME given to the harness"* ]]
   [[ "$output" == *"(deny mach-lookup"* ]]
+  # A block above the home that a command-line --allow reopens is how a
+  # caller hides a harness's store and keeps the private home inside it.
+  mkdir -p "$TEST_PROJECT/store/private/Library"
+  ln -s "$HOME/Library/Keychains" "$TEST_PROJECT/store/private/Library/Keychains"
+  local store="$TEST_PROJECT/store" covers="a block covers the keychain path under the HOME given to the harness"
+  run "$SCODE" --dry-run --login-store --block "$store" --allow "$store/private" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"allowing login store"* ]]
+  # A block elsewhere in the home changes nothing.
+  run "$SCODE" --dry-run --login-store --block "$store" --allow "$store/private" --block "$store/private/cache" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"allowing login store"* ]]
+  # Declined: no grant; a block at the home itself; a block over its Library.
+  run "$SCODE" --dry-run --login-store --block "$store" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"$covers"* ]]
+  run "$SCODE" --dry-run --login-store --block "$store" --allow "$store/private" --block "$store/private" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"$covers"* ]]
+  run "$SCODE" --dry-run --login-store --block "$store" --allow "$store/private" --block "$store/private/Library" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"$covers"* ]]
+  # A user-config grant does not count: under a command-line block scode
+  # drops it. The run is declined and the services stay closed.
+  printf 'allowed:\n  - %s\n' "$store/private" > "$SCODE_CONFIG"
+  run "$SCODE" --dry-run --login-store --block "$store" \
+    -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"$covers"* ]]
+  [[ "$output" == *"(deny mach-lookup"* ]]
+  printf 'blocked:\n  - %s\nallowed:\n  - %s\n' "$store" "$store/private" > "$SCODE_CONFIG"
+  run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"$covers"* ]]
+  # A command-line grant survives a user-config block.
+  printf 'blocked:\n  - %s\n' "$store" > "$SCODE_CONFIG"
+  run "$SCODE" --dry-run --login-store --allow "$store/private" -C "$HOME/project" -- /usr/bin/env "HOME=$store/private" "$harness"
+  [[ "$output" == *"allowing login store"* ]]
+  : > "$SCODE_CONFIG"
   # A HOME with a control character is declined and never echoed.
   run "$SCODE" --dry-run --login-store -C "$HOME/project" -- /usr/bin/env "HOME=/nonexistent/"$'\033'"]0;x" "$harness"
   [[ "$output" == *"contains a control character"* ]]
